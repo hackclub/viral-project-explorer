@@ -21,7 +21,7 @@ import { decompress } from 'fzstd';
 import { PUBLIC_BACKEND_URL } from '$env/static/public';
 
 // Constants
-const BACKEND_URL = PUBLIC_BACKEND_URL || 'http://localhost:8080';
+const BACKEND_URL = PUBLIC_BACKEND_URL;
 const API_KEY_STORAGE_KEY = 'api_key';
 const DB_FILENAME = 'database.sqlite';
 const META_FILENAME = 'database.meta.json';

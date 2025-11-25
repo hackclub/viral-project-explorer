@@ -176,16 +176,24 @@ The server starts on port `8080` by default.
 
 ### Frontend (`frontend/.env`)
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `PUBLIC_BACKEND_URL` | No | `http://localhost:8080` | Backend API URL for fetching the database |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `PUBLIC_BACKEND_URL` | Yes (build time) | Backend API URL for fetching the database |
 
-**Note:** Frontend environment variables prefixed with `PUBLIC_` are exposed to the client browser. Create a `frontend/.env` file:
+**Note:** Frontend environment variables prefixed with `PUBLIC_` are exposed to the client browser and must be set at **build time** (not runtime) for SvelteKit.
+
+**Local development:** Create a `frontend/.env` file:
 
 ```bash
 # frontend/.env
 PUBLIC_BACKEND_URL=http://localhost:8080
 ```
 
-For Docker Compose development, the `PUBLIC_BACKEND_URL` is automatically set in `docker-compose.yml`.
+**Docker Compose development:** The `PUBLIC_BACKEND_URL` is automatically set in `docker-compose.yml`.
+
+**Production Docker build:** Pass as a build argument:
+
+```bash
+docker build --build-arg PUBLIC_BACKEND_URL=https://api.example.com -t frontend ./frontend
+```
 

@@ -6,6 +6,10 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
+# Build argument for backend URL (required at build time for SvelteKit static env)
+ARG PUBLIC_BACKEND_URL
+ENV PUBLIC_BACKEND_URL=$PUBLIC_BACKEND_URL
+
 # Copy package files first for layer caching
 COPY package.json package-lock.json ./
 
