@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"net/http"
@@ -20,8 +21,9 @@ import (
 )
 
 var (
-	apiKey string
-	pgDB   *sql.DB
+	apiKey    string
+	emailSalt string
+	pgDB      *sql.DB
 
 	// Cache for the generated SQLite database (zstd compressed)
 	cacheMutex           sync.RWMutex
@@ -71,6 +73,19 @@ func generateRequestID() string {
 	return hex.EncodeToString(bytes)
 }
 
+// hashEmail normalizes an email (lowercase, strip spaces) and returns a salted FNV-1a hash
+func hashEmail(email string) string {
+	if email == "" {
+		return ""
+	}
+	// Normalize: lowercase and strip spaces
+	normalized := strings.ToLower(strings.TrimSpace(email))
+	// Create salted hash using FNV-1a (fast, non-cryptographic)
+	h := fnv.New64a()
+	h.Write([]byte(emailSalt + normalized))
+	return fmt.Sprintf("%016x", h.Sum64())
+}
+
 func main() {
 	// Configure log format with timestamps
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
@@ -108,6 +123,27 @@ func main() {
 		fmt.Println("")
 	} else {
 		appLog.Info("Using API key from environment")
+	}
+
+	// Get email salt from environment variable, or generate one if not set
+	emailSalt = os.Getenv("EMAIL_SALT")
+	if emailSalt == "" {
+		var err error
+		emailSalt, err = generateAPIKey() // Reuse the same random generator
+		if err != nil {
+			appLog.Error("Failed to generate email salt: %v", err)
+			os.Exit(1)
+		}
+		fmt.Println("")
+		fmt.Println("=" + strings.Repeat("=", 70) + "=")
+		fmt.Println("⚠️  EMAIL_SALT not set in environment")
+		fmt.Println("🧂 Generated email salt (save this if you need consistent hashes):")
+		fmt.Println("")
+		fmt.Printf("   %s\n", emailSalt)
+		fmt.Println("=" + strings.Repeat("=", 70) + "=")
+		fmt.Println("")
+	} else {
+		appLog.Info("Using email salt from environment")
 	}
 
 	// Connect to PostgreSQL
@@ -495,7 +531,8 @@ func createSQLiteTables(db *sql.DB) error {
 			approved_at TEXT,
 			override_hours_spent_justification TEXT,
 			age_when_approved INTEGER,
-			ysws_name TEXT
+			ysws_name TEXT,
+			email_hash TEXT
 		)
 	`)
 	if err != nil {
@@ -559,7 +596,8 @@ func copyApprovedProjects(sqliteDB *sql.DB) (int, error) {
 			ap.approved_at,
 			ap.override_hours_spent_justification,
 			ap.age_when_approved,
-			ysws_name.value as ysws_name
+			ysws_name.value as ysws_name,
+			ap.email
 		FROM airtable_unified_ysws_projects_db.approved_projects ap
 		LEFT JOIN airtable_unified_ysws_projects_db.approved_projects__ysws_name ysws_name
 			ON ap._dlt_id = ysws_name._dlt_parent_id
@@ -582,8 +620,8 @@ func copyApprovedProjects(sqliteDB *sql.DB) (int, error) {
 			record_id, first_name, last_name, git_hub_username, geocoded_country,
 			geocoded_country_code, playable_url, code_url,
 			hours_spent, approved_at, override_hours_spent_justification, age_when_approved,
-			ysws_name
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ysws_name, email_hash
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		tx.Rollback()
@@ -599,16 +637,24 @@ func copyApprovedProjects(sqliteDB *sql.DB) (int, error) {
 		var approvedAt, overrideHoursJustification sql.NullString
 		var ageWhenApproved sql.NullInt64
 		var yswsName sql.NullString
+		var email sql.NullString
 
 		err := rows.Scan(
 			&recordID, &firstName, &lastName, &gitHubUsername, &geocodedCountry,
 			&geocodedCountryCode, &playableURL, &codeURL,
 			&hoursSpent, &approvedAt, &overrideHoursJustification, &ageWhenApproved,
-			&yswsName,
+			&yswsName, &email,
 		)
 		if err != nil {
 			tx.Rollback()
 			return 0, fmt.Errorf("scanning row: %w", err)
+		}
+
+		// Hash the email if present
+		var emailHash *string
+		if email.Valid && email.String != "" {
+			h := hashEmail(email.String)
+			emailHash = &h
 		}
 
 		_, err = stmt.Exec(
@@ -618,7 +664,7 @@ func copyApprovedProjects(sqliteDB *sql.DB) (int, error) {
 			normalizeURL(playableURL), normalizeURL(codeURL),
 			nullFloat64ToPtr(hoursSpent), nullStringToPtr(approvedAt),
 			nullStringToPtr(overrideHoursJustification), nullInt64ToPtr(ageWhenApproved),
-			nullStringToPtr(yswsName),
+			nullStringToPtr(yswsName), emailHash,
 		)
 		if err != nil {
 			tx.Rollback()
@@ -767,6 +813,8 @@ func nullBoolToInt(nb sql.NullBool) interface{} {
 // - Trimming whitespace
 // - Lowercasing
 // - Adding https:// prefix if no scheme is present
+// - Removing .git suffix (for GitHub clone URLs)
+// - Removing /tree/... paths from GitHub URLs (branch references)
 func normalizeURL(ns sql.NullString) interface{} {
 	if !ns.Valid || ns.String == "" {
 		return nil
@@ -783,6 +831,17 @@ func normalizeURL(ns sql.NullString) interface{} {
 	// Add https:// if no scheme present
 	if url != "" && !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
 		url = "https://" + url
+	}
+
+	// Remove .git suffix (common in GitHub clone URLs)
+	url = strings.TrimSuffix(url, ".git")
+
+	// Remove /tree/... paths from GitHub URLs (these are branch/tag references, not file paths)
+	// Keep /blob/... paths intact as they reference specific files
+	if strings.Contains(url, "github.com/") {
+		if idx := strings.Index(url, "/tree/"); idx != -1 {
+			url = url[:idx] + "/"
+		}
 	}
 
 	if url == "" {

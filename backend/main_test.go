@@ -38,8 +38,8 @@ func TestNormalizeURL(t *testing.T) {
 		},
 		{
 			name:     "full URL with path",
-			input:    sql.NullString{String: "https://GitHub.com/HackClub/Sprig", Valid: true},
-			expected: "https://github.com/hackclub/sprig",
+			input:    sql.NullString{String: "https://GitHub.com/SomeOrg/SomeRepo", Valid: true},
+			expected: "https://github.com/someorg/somerepo",
 		},
 		{
 			name:     "null string returns nil",
@@ -56,6 +56,31 @@ func TestNormalizeURL(t *testing.T) {
 			input:    sql.NullString{String: "   ", Valid: true},
 			expected: nil,
 		},
+		{
+			name:     "remove .git suffix from GitHub URL",
+			input:    sql.NullString{String: "https://github.com/user/my-project.git", Valid: true},
+			expected: "https://github.com/user/my-project",
+		},
+		{
+			name:     "remove .git suffix without scheme",
+			input:    sql.NullString{String: "github.com/user/repo.git", Valid: true},
+			expected: "https://github.com/user/repo",
+		},
+		{
+			name:     "remove /tree/branch from GitHub URL",
+			input:    sql.NullString{String: "https://github.com/user/my-project/tree/master", Valid: true},
+			expected: "https://github.com/user/my-project/",
+		},
+		{
+			name:     "remove /tree/branch with nested path from GitHub URL",
+			input:    sql.NullString{String: "https://github.com/user/repo/tree/main/src/components", Valid: true},
+			expected: "https://github.com/user/repo/",
+		},
+		{
+			name:     "preserve /blob/ path in GitHub URL",
+			input:    sql.NullString{String: "https://github.com/user/repo/blob/main/src/file.txt", Valid: true},
+			expected: "https://github.com/user/repo/blob/main/src/file.txt",
+		},
 	}
 
 	for _, tt := range tests {
@@ -67,4 +92,5 @@ func TestNormalizeURL(t *testing.T) {
 		})
 	}
 }
+
 

@@ -22,20 +22,26 @@
 	let codeUrls = [];
 	let loadedCodeUrlsCount = 0;
 	let totalCodeUrls = 0;
+	let totalHours = 0;  // Sum of all hours for weighted projects calculation
 	const CODE_URL_BATCH_SIZE = 50;
 	let isLoadingMore = false;
 	
 	// Expanded state objects (using objects for better Svelte reactivity)
-	let expandedCodeUrls = {};  // code_url -> { projects: [], loaded: boolean }
+	let expandedCodeUrls = {};  // code_url -> { projects: [], articles: [], articleGroups: [], loaded: boolean }
+	let expandedArticleGroups = {};  // url -> boolean (expanded state)
 	let expandedProjects = {};  // record_id -> { articles: [], loaded: boolean }
 
 	// Filter and sort state
 	let selectedYsws = [];  // Array of selected YSWS names
 	let yswsSearchQuery = '';  // Search input for YSWS autocomplete
 	let showYswsDropdown = false;  // Whether to show autocomplete dropdown
-	let sortBy = 'date';  // 'date' or 'hours'
+	let sortBy = 'date';  // 'date', 'hours', or 'mentions'
+	let minMentions = 0;  // Minimum number of article mentions to show
 	let availableYsws = [];  // List of available YSWS names
 	let yswsInputRef;  // Reference to the search input
+	let selectedEmailHash = null;  // Filter by user email_hash
+	let selectedUserName = '';  // Display name for the filtered user
+	let selectedCountry = null;  // Filter by country
 
 	// Scroll container ref
 	let scrollContainer;
@@ -65,6 +71,7 @@
 		loadedCodeUrlsCount = 0;
 		codeUrls = [];
 		expandedCodeUrls = {};
+		expandedArticleGroups = {};
 		expandedProjects = {};
 		
 		// Build WHERE clause for filter
@@ -72,13 +79,53 @@
 		let params = [];
 		if (selectedYsws.length > 0) {
 			const placeholders = selectedYsws.map(() => '?').join(', ');
-			whereClause += ` AND ysws_name IN (${placeholders})`;
+			whereClause += ` AND ap.ysws_name IN (${placeholders})`;
 			params.push(...selectedYsws);
 		}
+		if (selectedEmailHash) {
+			whereClause += ` AND ap.email_hash = ?`;
+			params.push(selectedEmailHash);
+		}
+		if (selectedCountry) {
+			whereClause += ` AND ap.geocoded_country = ?`;
+			params.push(selectedCountry);
+		}
 		
-		// Get total count with filter
-		const countResult = queryAll(`SELECT COUNT(DISTINCT code_url) as count FROM approved_projects WHERE ${whereClause}`, params);
-		totalCodeUrls = countResult[0]?.count || 0;
+		// Get total count with filter (including min mentions)
+		let countQuery;
+		if (minMentions > 0) {
+			countQuery = queryAll(`
+				SELECT COUNT(*) as count FROM (
+					SELECT ap.code_url
+					FROM approved_projects ap
+					LEFT JOIN ysws_project_mentions m ON m.ysws_approved_project = ap.record_id
+					WHERE ${whereClause}
+					GROUP BY ap.code_url
+					HAVING COUNT(DISTINCT m.url) >= ${minMentions}
+				)
+			`, params);
+		} else {
+			countQuery = queryAll(`SELECT COUNT(DISTINCT code_url) as count FROM approved_projects ap WHERE ${whereClause}`, params);
+		}
+		totalCodeUrls = countQuery[0]?.count || 0;
+		
+		// Get total hours for weighted projects calculation
+		let hoursQuery;
+		if (minMentions > 0) {
+			hoursQuery = queryAll(`
+				SELECT SUM(hours_spent) as total_hours FROM approved_projects ap
+				WHERE ${whereClause} AND ap.code_url IN (
+					SELECT ap2.code_url
+					FROM approved_projects ap2
+					LEFT JOIN ysws_project_mentions m ON m.ysws_approved_project = ap2.record_id
+					GROUP BY ap2.code_url
+					HAVING COUNT(DISTINCT m.url) >= ${minMentions}
+				)
+			`, params);
+		} else {
+			hoursQuery = queryAll(`SELECT SUM(hours_spent) as total_hours FROM approved_projects ap WHERE ${whereClause}`, params);
+		}
+		totalHours = hoursQuery[0]?.total_hours || 0;
 		
 		// Load first batch
 		await loadMoreCodeUrls();
@@ -94,26 +141,48 @@
 		let params = [];
 		if (selectedYsws.length > 0) {
 			const placeholders = selectedYsws.map(() => '?').join(', ');
-			whereClause += ` AND ysws_name IN (${placeholders})`;
+			whereClause += ` AND ap.ysws_name IN (${placeholders})`;
 			params.push(...selectedYsws);
 		}
+		if (selectedEmailHash) {
+			whereClause += ` AND ap.email_hash = ?`;
+			params.push(selectedEmailHash);
+		}
+		if (selectedCountry) {
+			whereClause += ` AND ap.geocoded_country = ?`;
+			params.push(selectedCountry);
+		}
+		
+		// Build HAVING clause for min mentions filter
+		let havingClause = minMentions > 0 ? `HAVING article_count >= ${minMentions}` : '';
 		
 		// Build ORDER BY clause based on sort option
-		let orderBy = sortBy === 'hours' 
-			? 'SUM(hours_spent) DESC, MAX(approved_at) DESC'
-			: 'MAX(approved_at) DESC, code_url ASC';
+		let orderBy;
+		switch (sortBy) {
+			case 'hours':
+				orderBy = 'total_hours DESC, latest_approved_at DESC';
+				break;
+			case 'mentions':
+				orderBy = 'article_count DESC, latest_approved_at DESC';
+				break;
+			default:
+				orderBy = 'latest_approved_at DESC, code_url ASC';
+		}
 		
 		const newUrls = queryAll(`
 			SELECT 
-				code_url,
-				COUNT(*) as project_count,
-				MAX(approved_at) as latest_approved_at,
-				SUM(hours_spent) as total_hours,
-				GROUP_CONCAT(DISTINCT geocoded_country) as countries,
-				GROUP_CONCAT(DISTINCT ysws_name) as ysws_names
-			FROM approved_projects 
+				ap.code_url,
+				COUNT(DISTINCT ap.record_id) as project_count,
+				MAX(ap.approved_at) as latest_approved_at,
+				SUM(ap.hours_spent) as total_hours,
+				GROUP_CONCAT(DISTINCT ap.geocoded_country) as countries,
+				GROUP_CONCAT(DISTINCT ap.ysws_name) as ysws_names,
+				COUNT(DISTINCT m.url) as article_count
+			FROM approved_projects ap
+			LEFT JOIN ysws_project_mentions m ON m.ysws_approved_project = ap.record_id
 			WHERE ${whereClause}
-			GROUP BY code_url 
+			GROUP BY ap.code_url 
+			${havingClause}
 			ORDER BY ${orderBy}
 			LIMIT ? OFFSET ?
 		`, [...params, CODE_URL_BATCH_SIZE, loadedCodeUrlsCount]);
@@ -136,7 +205,7 @@
 			if (codeUrl === null || codeUrl === '') {
 				projects = queryAll(`
 					SELECT record_id, first_name, last_name, git_hub_username, geocoded_country, playable_url, code_url,
-						hours_spent, approved_at, override_hours_spent_justification, age_when_approved, ysws_name
+						hours_spent, approved_at, override_hours_spent_justification, age_when_approved, ysws_name, email_hash
 					FROM approved_projects 
 					WHERE code_url IS NULL OR code_url = ''
 					ORDER BY approved_at DESC
@@ -144,14 +213,82 @@
 			} else {
 				projects = queryAll(`
 					SELECT record_id, first_name, last_name, git_hub_username, geocoded_country, playable_url, code_url,
-						hours_spent, approved_at, override_hours_spent_justification, age_when_approved, ysws_name
+						hours_spent, approved_at, override_hours_spent_justification, age_when_approved, ysws_name, email_hash
 					FROM approved_projects 
 					WHERE code_url = ?
 					ORDER BY approved_at DESC
 				`, [codeUrl]);
 			}
 			
-			expandedCodeUrls = { ...expandedCodeUrls, [key]: { projects, loaded: true } };
+			// Load all articles for all projects with this code_url
+			const projectIds = projects.map(p => p.record_id);
+			let articles = [];
+			if (projectIds.length > 0) {
+				const placeholders = projectIds.map(() => '?').join(', ');
+				articles = queryAll(`
+					SELECT 
+						id, headline, source, url, link_found_at, 
+						date, weighted_engagement_points, engagement_count, 
+						engagement_type, mentions_hack_club, published_by_hack_club,
+						ysws_approved_project
+					FROM ysws_project_mentions 
+					WHERE ysws_approved_project IN (${placeholders})
+					ORDER BY date DESC, link_found_at DESC
+				`, projectIds);
+			}
+			
+			// Group articles by URL
+			const articleGroups = groupArticlesByUrl(articles);
+			
+			expandedCodeUrls = { ...expandedCodeUrls, [key]: { projects, articles, articleGroups, loaded: true } };
+		}
+	}
+
+	function groupArticlesByUrl(articles) {
+		const groups = {};
+		
+		for (const article of articles) {
+			const url = article.url || article.link_found_at || '(no URL)';
+			if (!groups[url]) {
+				groups[url] = {
+					url,
+					articles: [],
+					latestDate: null,
+					totalEngagement: 0,
+					headline: article.headline,
+					source: article.source
+				};
+			}
+			groups[url].articles.push(article);
+			
+			// Track latest date for sorting
+			const articleDate = article.date || article.link_found_at;
+			if (articleDate && (!groups[url].latestDate || articleDate > groups[url].latestDate)) {
+				groups[url].latestDate = articleDate;
+				// Update headline to most recent
+				groups[url].headline = article.headline || groups[url].headline;
+				groups[url].source = article.source || groups[url].source;
+			}
+			
+			// Sum engagement
+			groups[url].totalEngagement += article.weighted_engagement_points || 0;
+		}
+		
+		// Convert to array and sort by most recent date
+		return Object.values(groups).sort((a, b) => {
+			if (!a.latestDate && !b.latestDate) return 0;
+			if (!a.latestDate) return 1;
+			if (!b.latestDate) return -1;
+			return b.latestDate.localeCompare(a.latestDate);
+		});
+	}
+
+	function toggleArticleGroup(url) {
+		if (expandedArticleGroups[url]) {
+			delete expandedArticleGroups[url];
+			expandedArticleGroups = { ...expandedArticleGroups };
+		} else {
+			expandedArticleGroups = { ...expandedArticleGroups, [url]: true };
 		}
 	}
 
@@ -338,6 +475,39 @@
 			showYswsDropdown = false;
 		}, 200);
 	}
+
+	function setUserFilter(emailHash, displayName) {
+		if (emailHash) {
+			selectedEmailHash = emailHash;
+			selectedUserName = displayName || 'Unknown User';
+			refreshCodeUrls();
+		}
+	}
+
+	function clearUserFilter() {
+		selectedEmailHash = null;
+		selectedUserName = '';
+		refreshCodeUrls();
+	}
+
+	function setCountryFilter(country) {
+		if (country) {
+			selectedCountry = country;
+			refreshCodeUrls();
+		}
+	}
+
+	function clearCountryFilter() {
+		selectedCountry = null;
+		refreshCodeUrls();
+	}
+
+	function addYswsFromBadge(ysws) {
+		if (ysws && !selectedYsws.includes(ysws)) {
+			selectedYsws = [...selectedYsws, ysws];
+			refreshCodeUrls();
+		}
+	}
 </script>
 
 <main>
@@ -413,6 +583,26 @@
 		</div>
 
 		{#if $dbReady}
+			{#if selectedEmailHash || selectedCountry}
+				<div class="active-filters">
+					{#if selectedEmailHash}
+						<div class="filter-banner user-filter-banner">
+							<span class="filter-banner-icon">👤</span>
+							<span class="filter-banner-label">User:</span>
+							<span class="filter-banner-value">{selectedUserName}</span>
+							<button class="filter-banner-clear" on:click={clearUserFilter}>×</button>
+						</div>
+					{/if}
+					{#if selectedCountry}
+						<div class="filter-banner country-filter-banner">
+							<span class="filter-banner-icon">🌍</span>
+							<span class="filter-banner-label">Country:</span>
+							<span class="filter-banner-value">{selectedCountry}</span>
+							<button class="filter-banner-clear" on:click={clearCountryFilter}>×</button>
+						</div>
+					{/if}
+				</div>
+			{/if}
 			<div class="filter-controls">
 				<div class="filter-group ysws-filter">
 					<label>Filter by YSWS:</label>
@@ -450,14 +640,29 @@
 					</div>
 				</div>
 				<div class="filter-group">
+					<label for="min-mentions">Min articles:</label>
+					<input
+						type="number"
+						id="min-mentions"
+						bind:value={minMentions}
+						on:change={refreshCodeUrls}
+						min="0"
+						class="number-input"
+						placeholder="0"
+					/>
+				</div>
+				<div class="filter-group">
 					<label for="sort-by">Sort by:</label>
 					<select id="sort-by" bind:value={sortBy} on:change={refreshCodeUrls}>
 						<option value="date">Most Recent</option>
 						<option value="hours">Total Hours</option>
+						<option value="mentions">Most Articles</option>
 					</select>
 				</div>
 				<div class="filter-stats">
-					{totalCodeUrls} project{totalCodeUrls !== 1 ? 's' : ''} found
+					<span class="stat-item">{totalCodeUrls.toLocaleString()} project{totalCodeUrls !== 1 ? 's' : ''}</span>
+					<span class="stat-divider">•</span>
+					<span class="stat-item weighted">{totalHours / 10 < 10 ? (totalHours / 10).toFixed(1) : Math.round(totalHours / 10).toLocaleString()} weighted</span>
 				</div>
 			</div>
 		{/if}
@@ -480,43 +685,63 @@
 								<span class="node-icon">📁</span>
 								<span class="node-label">{codeUrlItem.code_url || '(no code URL)'}</span>
 								<span class="badge">{codeUrlItem.project_count} project{codeUrlItem.project_count !== 1 ? 's' : ''}</span>
+								{#if codeUrlItem.article_count > 0}
+									<span class="articles-badge">📰 {codeUrlItem.article_count} article{codeUrlItem.article_count !== 1 ? 's' : ''}</span>
+								{/if}
 								{#if codeUrlItem.total_hours}
 									<span class="hours-badge">⏱️ {formatHours(codeUrlItem.total_hours)}h total</span>
 								{/if}
 								{#if codeUrlItem.latest_approved_at}
 									<span class="date-badge">📅 {formatDate(codeUrlItem.latest_approved_at)}</span>
 								{/if}
-								{#if codeUrlItem.countries}
-									<span class="country">{formatCountries(codeUrlItem.countries)}</span>
-								{/if}
 								{#each formatYswsNames(codeUrlItem.ysws_names) as yswsName}
-									<span class="ysws-badge">{yswsName}</span>
+									<button 
+										class="ysws-badge clickable"
+										on:click|stopPropagation={() => addYswsFromBadge(yswsName)}
+										title="Filter by {yswsName}"
+									>{yswsName}</button>
 								{/each}
+								{#if codeUrlItem.countries}
+									{@const countryList = codeUrlItem.countries.split(',').map(c => c.trim()).filter(Boolean)}
+									{#each [...new Set(countryList)].slice(0, 3) as country}
+										<button 
+											class="country clickable"
+											on:click|stopPropagation={() => setCountryFilter(country)}
+											title="Filter by {country}"
+										>{country}</button>
+									{/each}
+									{#if [...new Set(countryList)].length > 3}
+										<span class="country">+{[...new Set(countryList)].length - 3}</span>
+									{/if}
+								{/if}
 							</button>
 							
-							{#if isExpanded && codeUrlData?.projects}
+							{#if isExpanded && codeUrlData?.loaded}
 								<div class="tree-children">
+									<!-- Approved Projects (same level as articles) -->
 									{#each codeUrlData.projects as project (project.record_id)}
-										{@const isProjectExpanded = !!expandedProjects[project.record_id]}
-										{@const projectData = expandedProjects[project.record_id]}
-										
 										<div class="tree-node project-node">
 											<div class="project-row">
-												<button 
-													class="tree-toggle"
-													on:click={() => toggleProject(project.record_id)}
-													aria-expanded={isProjectExpanded}
-												>
-													<span class="chevron" class:expanded={isProjectExpanded}>▶</span>
-													<span class="node-icon">🚀</span>
-													<span class="node-label">
+											<div class="tree-item">
+												<span class="node-icon">🚀</span>
+												<span class="node-label">
+													<button 
+														class="user-link"
+														on:click|stopPropagation={() => setUserFilter(project.email_hash, `${project.first_name || 'Unknown'}${project.last_name ? ' ' + project.last_name : ''}${project.git_hub_username ? ' (@' + project.git_hub_username + ')' : ''}`)}
+														title="Filter by this user's projects"
+													>
 														{project.first_name || 'Unknown'}{#if project.last_name} {project.last_name}{/if}
 														{#if project.git_hub_username}
 															<span class="username">@{project.git_hub_username}</span>
 														{/if}
-													</span>
+													</button>
+												</span>
 													{#if project.ysws_name}
-														<span class="ysws-badge">{project.ysws_name}</span>
+														<button 
+															class="ysws-badge clickable"
+															on:click|stopPropagation={() => addYswsFromBadge(project.ysws_name)}
+															title="Filter by {project.ysws_name}"
+														>{project.ysws_name}</button>
 													{/if}
 													{#if project.hours_spent}
 														<span class="hours-badge" title={project.override_hours_spent_justification || ''}>
@@ -530,65 +755,103 @@
 														<span class="date-badge">📅 {formatDate(project.approved_at)}</span>
 													{/if}
 													{#if project.geocoded_country}
-														<span class="country">{project.geocoded_country}</span>
+														<button 
+															class="country clickable"
+															on:click|stopPropagation={() => setCountryFilter(project.geocoded_country)}
+															title="Filter by {project.geocoded_country}"
+														>{project.geocoded_country}</button>
 													{/if}
-												</button>
+												</div>
 												<div class="project-links">
 													{#if project.playable_url}
-														<a href={project.playable_url} target="_blank" rel="noopener" class="link-btn" on:click|stopPropagation>
+														<a href={project.playable_url} target="_blank" rel="noopener" class="link-btn">
 															🎮 Play
 														</a>
 													{/if}
 													{#if project.code_url}
-														<a href={project.code_url} target="_blank" rel="noopener" class="link-btn" on:click|stopPropagation>
+														<a href={project.code_url} target="_blank" rel="noopener" class="link-btn">
 															📂 Code
 														</a>
 													{/if}
 												</div>
 											</div>
-											
-											{#if isProjectExpanded && projectData?.articles}
-												<div class="tree-children articles">
-													{#if projectData.articles.length === 0}
-														<div class="empty-state">
-															<span>📭</span> No articles found for this project
 														</div>
-													{:else}
-														{#each projectData.articles as article (article.id)}
-															{@const badge = getEngagementBadge(article.weighted_engagement_points)}
-															<div class="article-card">
-																<div class="article-header">
-																	<span class="article-icon">📰</span>
-																	<a href={article.url || article.link_found_at} target="_blank" rel="noopener" class="article-title">
-																		{article.headline || formatUrl(article.url || article.link_found_at)}
-																	</a>
+									{/each}
+									
+									<!-- Articles (same level as approved projects) -->
+									{#each codeUrlData.articleGroups || [] as group (group.url)}
+										{@const isGroupExpanded = !!expandedArticleGroups[group.url]}
+										{@const badge = getEngagementBadge(group.totalEngagement)}
+										
+										<div class="tree-node article-node">
+											<button 
+												class="tree-toggle"
+												on:click={() => toggleArticleGroup(group.url)}
+												aria-expanded={isGroupExpanded}
+											>
+												<span class="chevron" class:expanded={isGroupExpanded}>▶</span>
+												<span class="node-icon">📰</span>
+												<span class="node-label article-title-label">
+													{group.headline || formatUrl(group.url)}
+												</span>
+												{#if group.source}
+													<span class="source-badge">{group.source}</span>
+												{/if}
+												{#if group.latestDate}
+													<span class="date-badge">📅 {formatDate(group.latestDate)}</span>
+												{/if}
+												{#if group.articles.length > 1}
+													<span class="mention-count">{group.articles.length} mentions</span>
+												{/if}
 																	{#if badge}
 																		<span class="engagement-badge {badge.class}">{badge.label}</span>
 																	{/if}
-																</div>
-																<div class="article-meta">
-																	{#if article.source}
-																		<span class="source">{article.source}</span>
-																	{/if}
+												<a href={group.url} target="_blank" rel="noopener" class="link-btn" on:click|stopPropagation>
+													↗
+												</a>
+											</button>
+											
+											{#if isGroupExpanded}
+												<div class="tree-children">
+													{#each group.articles as article (article.id)}
+														<div class="tree-node">
+															<div class="tree-item article-mention-item">
+																<span class="node-icon">📋</span>
 																	{#if article.date}
-																		<span class="date">{formatDate(article.date)}</span>
+																	<span class="date-badge">📅 {formatDate(article.date)}</span>
 																	{/if}
 																	{#if article.engagement_count}
 																		<span class="engagement">
 																			{article.engagement_type}: {article.engagement_count.toLocaleString()}
 																		</span>
 																	{/if}
+																{#if article.weighted_engagement_points}
+																	<span class="points">
+																		{article.weighted_engagement_points.toLocaleString()} pts
+																	</span>
+																{/if}
 																	{#if article.mentions_hack_club}
-																		<span class="hc-mention">🟠 Mentions HC</span>
+																	<span class="hc-mention">🟠 HC</span>
+																{/if}
+																{#if article.published_by_hack_club}
+																	<span class="hc-published">🔴 Published by HC</span>
+																{/if}
+																{#if article.headline && article.headline !== group.headline}
+																	<span class="article-alt-headline">{article.headline}</span>
 																	{/if}
 																</div>
 															</div>
 														{/each}
-													{/if}
 												</div>
 											{/if}
 										</div>
 									{/each}
+									
+									{#if codeUrlData.projects.length === 0 && (!codeUrlData.articleGroups || codeUrlData.articleGroups.length === 0)}
+										<div class="empty-state">
+											<span>📭</span> No data found
+										</div>
+									{/if}
 								</div>
 							{/if}
 						</div>
@@ -855,6 +1118,23 @@
 		box-shadow: 0 0 0 2px rgba(0,217,255,0.2);
 	}
 
+	.number-input {
+		width: 70px;
+		padding: 0.5rem 0.75rem;
+		border-radius: 6px;
+		border: 1px solid rgba(255,255,255,0.15);
+		background: rgba(0,0,0,0.3);
+		color: #e0e0e0;
+		font-size: 0.875rem;
+		text-align: center;
+	}
+
+	.number-input:focus {
+		outline: none;
+		border-color: #00d9ff;
+		box-shadow: 0 0 0 2px rgba(0,217,255,0.2);
+	}
+
 	.ysws-multiselect {
 		position: relative;
 		flex: 1;
@@ -962,6 +1242,22 @@
 		margin-left: auto;
 		font-size: 0.875rem;
 		color: #888;
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
+	.stat-item {
+		color: #aaa;
+	}
+
+	.stat-item.weighted {
+		color: #00ff88;
+		font-weight: 500;
+	}
+
+	.stat-divider {
+		color: #555;
 	}
 
 	.tree-container {
@@ -1041,12 +1337,102 @@
 		font-size: 0.85rem;
 	}
 
+	.user-link {
+		background: none;
+		border: none;
+		padding: 0;
+		color: inherit;
+		font: inherit;
+		cursor: pointer;
+		text-decoration: none;
+		transition: all 0.15s;
+	}
+
+	.user-link:hover {
+		color: #00d9ff;
+		text-decoration: underline;
+	}
+
+	.user-link .username {
+		color: #00d9ff;
+	}
+
+	.active-filters {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem;
+		margin-bottom: 1rem;
+	}
+
+	.filter-banner {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		padding: 0.5rem 0.75rem;
+		border-radius: 6px;
+		font-size: 0.85rem;
+	}
+
+	.filter-banner.user-filter-banner {
+		background: linear-gradient(135deg, rgba(0,217,255,0.15), rgba(0,255,136,0.1));
+		border: 1px solid rgba(0,217,255,0.3);
+	}
+
+	.filter-banner.country-filter-banner {
+		background: linear-gradient(135deg, rgba(255,170,0,0.15), rgba(255,136,0,0.1));
+		border: 1px solid rgba(255,170,0,0.3);
+	}
+
+	.filter-banner-icon {
+		font-size: 1rem;
+	}
+
+	.filter-banner-label {
+		color: #888;
+	}
+
+	.filter-banner-value {
+		color: #00d9ff;
+		font-weight: 500;
+	}
+
+	.country-filter-banner .filter-banner-value {
+		color: #ffaa00;
+	}
+
+	.filter-banner-clear {
+		background: rgba(255,82,82,0.15);
+		border: 1px solid rgba(255,82,82,0.3);
+		color: #ff5252;
+		padding: 0.15rem 0.4rem;
+		border-radius: 4px;
+		font-size: 0.75rem;
+		cursor: pointer;
+		transition: all 0.15s;
+		margin-left: 0.25rem;
+	}
+
+	.filter-banner-clear:hover {
+		background: rgba(255,82,82,0.25);
+	}
+
 	.country {
 		color: #888;
 		font-size: 0.8rem;
 		background: rgba(255,255,255,0.05);
 		padding: 0.15rem 0.5rem;
 		border-radius: 4px;
+		border: none;
+	}
+
+	.country.clickable {
+		cursor: pointer;
+		transition: all 0.15s;
+	}
+
+	.country.clickable:hover {
+		background: rgba(255,170,0,0.2);
+		color: #ffaa00;
 	}
 
 	.hours-badge {
@@ -1080,11 +1466,31 @@
 		background: rgba(179,136,255,0.15);
 		padding: 0.15rem 0.5rem;
 		border-radius: 4px;
+		border: none;
+	}
+
+	.ysws-badge.clickable {
+		cursor: pointer;
+		transition: all 0.15s;
+	}
+
+	.ysws-badge.clickable:hover {
+		background: rgba(179,136,255,0.3);
+		color: #d4b8ff;
 	}
 
 	.badge {
 		background: rgba(0,217,255,0.15);
 		color: #00d9ff;
+		padding: 0.2rem 0.5rem;
+		border-radius: 4px;
+		font-size: 0.75rem;
+		flex-shrink: 0;
+	}
+
+	.articles-badge {
+		background: rgba(255,136,0,0.15);
+		color: #ff8800;
 		padding: 0.2rem 0.5rem;
 		border-radius: 4px;
 		font-size: 0.75rem;
@@ -1133,44 +1539,75 @@
 		color: #00d9ff;
 	}
 
-	.articles {
-		margin-top: 0.5rem;
-	}
-
-	.article-card {
-		background: rgba(255,255,255,0.03);
-		border: 1px solid rgba(255,255,255,0.06);
-		border-radius: 8px;
-		padding: 0.75rem 1rem;
-		margin-bottom: 0.5rem;
-	}
-
-	.article-card:hover {
-		border-color: rgba(255,255,255,0.12);
-	}
-
-	.article-header {
+	/* Tree item (non-expandable row) */
+	.tree-item {
 		display: flex;
-		align-items: flex-start;
+		align-items: center;
 		gap: 0.5rem;
-		margin-bottom: 0.5rem;
+		padding: 0.6rem 0.8rem;
+		background: rgba(255,255,255,0.02);
+		border: 1px solid transparent;
+		border-radius: 8px;
+		color: #e0e0e0;
+		font-size: 0.9rem;
+		flex: 1;
 	}
 
-	.article-icon {
-		font-size: 1rem;
+	.tree-item:hover {
+		background: rgba(255,255,255,0.04);
+		border-color: rgba(255,255,255,0.08);
+	}
+
+	.project-row {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
+	.article-node {
+		/* Article entries styling */
+	}
+
+	.article-title-label {
+		color: #fff;
+	}
+
+	.source-badge {
+		font-size: 0.7rem;
+		padding: 0.1rem 0.4rem;
+		background: rgba(136,136,136,0.2);
+		color: #aaa;
+		border-radius: 3px;
 		flex-shrink: 0;
 	}
 
-	.article-title {
-		flex: 1;
-		color: #fff;
-		font-weight: 500;
-		text-decoration: none;
-		line-height: 1.3;
+	.mention-count {
+		font-size: 0.75rem;
+		padding: 0.15rem 0.5rem;
+		background: rgba(0,217,255,0.15);
+		color: #00d9ff;
+		border-radius: 4px;
+		flex-shrink: 0;
 	}
 
-	.article-title:hover {
-		color: #00d9ff;
+	.article-mention-item {
+		font-size: 0.85rem;
+		padding: 0.5rem 0.8rem;
+	}
+
+	.article-alt-headline {
+		color: #888;
+		font-size: 0.8rem;
+		margin-left: 0.5rem;
+		font-style: italic;
+	}
+
+	.points {
+		color: #b388ff;
+	}
+
+	.hc-published {
+		color: #ff3333;
 	}
 
 	.engagement-badge {
@@ -1193,14 +1630,6 @@
 	.engagement-badge.warm {
 		background: rgba(0,255,136,0.15);
 		color: #00ff88;
-	}
-
-	.article-meta {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.75rem;
-		font-size: 0.8rem;
-		color: #666;
 	}
 
 	.source {

@@ -67,6 +67,7 @@ Contains YSWS approved project information.
 | `override_hours_spent_justification` | TEXT | Justification for hours override |
 | `age_when_approved` | INTEGER | Age of the creator when approved |
 | `ysws_name` | TEXT | Name of the YSWS program (e.g., "Daydream", "Summer of Making") |
+| `email_hash` | TEXT | Salted FNV-1a hash of normalized email (for identity matching) |
 
 ### `ysws_project_mentions`
 
