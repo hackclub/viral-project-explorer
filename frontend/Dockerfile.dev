@@ -1,0 +1,18 @@
+# Development Dockerfile for SvelteKit frontend with Vite HMR
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Copy package files first for layer caching
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# Copy the rest of the source code
+COPY . .
+
+# Expose Vite dev server port
+EXPOSE 5173
+
+# Run the dev server with HMR
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+

@@ -1,0 +1,55 @@
+# Development Docker Compose configuration
+# Provides live reload for both frontend and backend services
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount source code for live reload (exclude tmp and vendor)
+      - ./backend:/app
+      - /app/tmp
+      - backend_go_cache:/go/pkg/mod
+    environment:
+      - WAREHOUSE_READONLY_UNIFIED_YSWS_DATABASE_URL=${WAREHOUSE_READONLY_UNIFIED_YSWS_DATABASE_URL}
+      - API_KEY=${API_KEY:-}
+    env_file:
+      - path: .env
+        required: false
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/db", "||", "exit", "0"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "5173:5173"
+    volumes:
+      # Mount source code for live reload (exclude node_modules)
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+    restart: unless-stopped
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5173"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  backend_go_cache:
+    name: viral-project-explorer-go-cache
+

@@ -1,0 +1,24 @@
+# Compiled binary
+server
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Air temp directory
+tmp/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Docs
+*.md
+!README.md
+

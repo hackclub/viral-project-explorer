@@ -1,0 +1,25 @@
+# Dependencies (will be installed in container)
+node_modules/
+
+# Build output
+.svelte-kit/
+build/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Docs
+*.md
+!README.md
+
+# Env files (passed via docker-compose)
+.env*
+
