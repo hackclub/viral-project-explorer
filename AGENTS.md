@@ -73,8 +73,8 @@ docker compose ps
 Expected output when running:
 ```
 NAME                              IMAGE                                  COMMAND                  SERVICE    PORTS                    STATUS
-viral-project-explorer-backend    viral-project-explorer-backend         "air -c .air.toml"       backend    0.0.0.0:8080->8080/tcp   Up X minutes (healthy)
-viral-project-explorer-frontend   viral-project-explorer-frontend        "npm run dev -- --h…"   frontend   0.0.0.0:5173->5173/tcp   Up X minutes (healthy)
+viral-project-explorer-backend    viral-project-explorer-backend         "air -c .air.toml"       backend    0.0.0.0:8080->8080/tcp   Up X minutes
+viral-project-explorer-frontend   viral-project-explorer-frontend        "npm run dev -- --h…"   frontend   0.0.0.0:5173->5173/tcp   Up X minutes
 ```
 
 If services show as "Exited" or aren't listed, the environment is not running.
