@@ -232,7 +232,7 @@ export async function loadFromCache() {
 export async function loadDatabase(apiKey) {
 	if (typeof window === 'undefined') return false;
 	
-	const key = apiKey || localStorage.getItem(API_KEY_STORAGE_KEY);
+	const key = apiKey || sessionStorage.getItem(API_KEY_STORAGE_KEY);
 	if (!key) {
 		loadError.set('No API key configured');
 		return false;

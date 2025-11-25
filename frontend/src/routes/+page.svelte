@@ -47,7 +47,7 @@
 	let scrollContainer;
 
 	onMount(async () => {
-		const stored = localStorage.getItem(API_KEY_STORAGE_KEY);
+		const stored = sessionStorage.getItem(API_KEY_STORAGE_KEY);
 		if (stored) {
 			apiKey = stored;
 			const loadedFromCache = await loadFromCache();
@@ -334,7 +334,7 @@
 	function saveApiKey() {
 		if (inputValue.trim()) {
 			apiKey = inputValue.trim();
-			localStorage.setItem(API_KEY_STORAGE_KEY, apiKey);
+			sessionStorage.setItem(API_KEY_STORAGE_KEY, apiKey);
 			inputValue = '';
 			isEditing = false;
 			codeUrls = [];
@@ -345,7 +345,7 @@
 
 	function clearApiKey() {
 		apiKey = '';
-		localStorage.removeItem(API_KEY_STORAGE_KEY);
+		sessionStorage.removeItem(API_KEY_STORAGE_KEY);
 		showKey = false;
 		codeUrls = [];
 		expandedCodeUrls = {};
@@ -741,7 +741,7 @@
 														on:click|stopPropagation={() => setUserFilter(project.email_hash, `${project.first_name || 'Unknown'}${project.last_name ? ' ' + project.last_name : ''}${project.git_hub_username ? ' (@' + project.git_hub_username + ')' : ''}`)}
 														title="Filter by this user's projects"
 													>
-														{project.first_name || 'Unknown'}{#if project.last_name} {project.last_name}{/if}
+														{project.first_name || 'Unknown'}{#if project.last_name}{' '}{project.last_name}{/if}
 														{#if project.git_hub_username}
 															<span class="username">@{project.git_hub_username}</span>
 														{/if}
