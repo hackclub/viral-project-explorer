@@ -1,11 +1,12 @@
 package main
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"log"
 	"net/http"
@@ -73,17 +74,18 @@ func generateRequestID() string {
 	return hex.EncodeToString(bytes)
 }
 
-// hashEmail normalizes an email (lowercase, strip spaces) and returns a salted FNV-1a hash
+// hashEmail normalizes an email (lowercase, strip spaces) and returns an HMAC-SHA256 hash
+// using the EMAIL_SALT as the secret key for cryptographic security
 func hashEmail(email string) string {
 	if email == "" {
 		return ""
 	}
 	// Normalize: lowercase and strip spaces
 	normalized := strings.ToLower(strings.TrimSpace(email))
-	// Create salted hash using FNV-1a (fast, non-cryptographic)
-	h := fnv.New64a()
-	h.Write([]byte(emailSalt + normalized))
-	return fmt.Sprintf("%016x", h.Sum64())
+	// Create HMAC-SHA256 using emailSalt as the secret key
+	h := hmac.New(sha256.New, []byte(emailSalt))
+	h.Write([]byte(normalized))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func main() {
@@ -307,7 +309,7 @@ func dbHandler(w http.ResponseWriter, r *http.Request) {
 	newPath, err := generateDB()
 	if err != nil {
 		appLog.Error("Failed to generate database: %v", err)
-		http.Error(w, fmt.Sprintf("Failed to generate database: %v", err), http.StatusInternalServerError)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 
@@ -486,7 +488,7 @@ func serveCachedDB(w http.ResponseWriter, compressedPath string, requestStart ti
 	file, err := os.Open(compressedPath)
 	if err != nil {
 		appLog.Error("Failed to open file for reading: %v", err)
-		http.Error(w, fmt.Sprintf("Failed to open file for reading: %v", err), http.StatusInternalServerError)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 	defer file.Close()
@@ -495,7 +497,7 @@ func serveCachedDB(w http.ResponseWriter, compressedPath string, requestStart ti
 	fileInfo, err := file.Stat()
 	if err != nil {
 		appLog.Error("Failed to stat file: %v", err)
-		http.Error(w, fmt.Sprintf("Failed to stat file: %v", err), http.StatusInternalServerError)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 
@@ -809,9 +811,19 @@ func nullBoolToInt(nb sql.NullBool) interface{} {
 	return nil
 }
 
+// dangerousSchemes contains URL schemes that should be rejected for security reasons.
+// These schemes can be used for XSS attacks if URLs are rendered in HTML contexts.
+var dangerousSchemes = []string{
+	"javascript:",
+	"data:",
+	"vbscript:",
+	"file:",
+}
+
 // normalizeURL normalizes a URL by:
 // - Trimming whitespace
 // - Lowercasing
+// - Rejecting dangerous URL schemes (javascript:, data:, vbscript:, file:)
 // - Adding https:// prefix if no scheme is present
 // - Removing .git suffix (for GitHub clone URLs)
 // - Removing /tree/... paths from GitHub URLs (branch references)
@@ -825,8 +837,15 @@ func normalizeURL(ns sql.NullString) interface{} {
 	// Replace multiple spaces with single space, then remove all spaces
 	url = strings.Join(strings.Fields(url), "")
 
-	// Lowercase the URL
+	// Lowercase the URL for consistent comparison
 	url = strings.ToLower(url)
+
+	// Reject dangerous URL schemes (must be done after lowercasing to catch all case variations)
+	for _, scheme := range dangerousSchemes {
+		if strings.HasPrefix(url, scheme) {
+			return nil
+		}
+	}
 
 	// Add https:// if no scheme present
 	if url != "" && !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {

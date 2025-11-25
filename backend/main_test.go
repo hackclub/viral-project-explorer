@@ -81,6 +81,47 @@ func TestNormalizeURL(t *testing.T) {
 			input:    sql.NullString{String: "https://github.com/user/repo/blob/main/src/file.txt", Valid: true},
 			expected: "https://github.com/user/repo/blob/main/src/file.txt",
 		},
+		// Security: Dangerous URL scheme tests
+		{
+			name:     "reject javascript: scheme",
+			input:    sql.NullString{String: "javascript:alert(1)", Valid: true},
+			expected: nil,
+		},
+		{
+			name:     "reject JavaScript: scheme (mixed case)",
+			input:    sql.NullString{String: "JavaScript:alert(document.cookie)", Valid: true},
+			expected: nil,
+		},
+		{
+			name:     "reject JAVASCRIPT: scheme (uppercase)",
+			input:    sql.NullString{String: "JAVASCRIPT:void(0)", Valid: true},
+			expected: nil,
+		},
+		{
+			name:     "reject data: scheme",
+			input:    sql.NullString{String: "data:text/html,<script>alert(1)</script>", Valid: true},
+			expected: nil,
+		},
+		{
+			name:     "reject DATA: scheme (uppercase)",
+			input:    sql.NullString{String: "DATA:text/html,<script>alert(1)</script>", Valid: true},
+			expected: nil,
+		},
+		{
+			name:     "reject vbscript: scheme",
+			input:    sql.NullString{String: "vbscript:msgbox(1)", Valid: true},
+			expected: nil,
+		},
+		{
+			name:     "reject file: scheme",
+			input:    sql.NullString{String: "file:///etc/passwd", Valid: true},
+			expected: nil,
+		},
+		{
+			name:     "reject javascript: with spaces (after normalization)",
+			input:    sql.NullString{String: "java script:alert(1)", Valid: true},
+			expected: nil,
+		},
 	}
 
 	for _, tt := range tests {
