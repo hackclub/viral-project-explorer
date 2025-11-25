@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
@@ -19,7 +21,40 @@ import (
 var (
 	apiKey string
 	pgDB   *sql.DB
+
+	// Cache for the generated SQLite database
+	cacheMutex     sync.RWMutex
+	cachedDBPath   string
+	cacheCreatedAt time.Time
+	cacheTTL       = 5 * time.Minute
 )
+
+// Custom logger with timestamps
+type Logger struct {
+	prefix string
+}
+
+func (l *Logger) Info(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	log.Printf("[INFO]  %s%s", l.prefix, msg)
+}
+
+func (l *Logger) Error(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	log.Printf("[ERROR] %s%s", l.prefix, msg)
+}
+
+func (l *Logger) Warn(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	log.Printf("[WARN]  %s%s", l.prefix, msg)
+}
+
+func (l *Logger) Debug(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	log.Printf("[DEBUG] %s%s", l.prefix, msg)
+}
+
+var appLog = &Logger{}
 
 func generateAPIKey() (string, error) {
 	bytes := make([]byte, 32)
@@ -29,12 +64,25 @@ func generateAPIKey() (string, error) {
 	return hex.EncodeToString(bytes), nil
 }
 
+func generateRequestID() string {
+	bytes := make([]byte, 8)
+	rand.Read(bytes)
+	return hex.EncodeToString(bytes)
+}
+
 func main() {
+	// Configure log format with timestamps
+	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
+
+	appLog.Info("Starting Viral Project Explorer backend...")
+
 	// Load .env file if it exists
 	if err := godotenv.Load(); err != nil {
 		if err2 := godotenv.Load("../.env"); err2 != nil {
-			log.Printf("Warning: .env file not found or couldn't be loaded: %v", err)
+			appLog.Warn(".env file not found or couldn't be loaded: %v", err)
 		}
+	} else {
+		appLog.Info("Loaded .env file")
 	}
 
 	// Get API key from environment variable, or generate one if not set
@@ -43,8 +91,10 @@ func main() {
 		var err error
 		apiKey, err = generateAPIKey()
 		if err != nil {
-			log.Fatalf("Failed to generate API key: %v", err)
+			appLog.Error("Failed to generate API key: %v", err)
+			os.Exit(1)
 		}
+		fmt.Println("")
 		fmt.Println("=" + strings.Repeat("=", 70) + "=")
 		fmt.Println("⚠️  API_KEY not set in environment")
 		fmt.Println("🔑 Generated API key (use this for authentication):")
@@ -55,41 +105,114 @@ func main() {
 		fmt.Printf("   curl -H \"X-API-Key: %s\" http://localhost:8080/db\n", apiKey)
 		fmt.Println("=" + strings.Repeat("=", 70) + "=")
 		fmt.Println("")
+	} else {
+		appLog.Info("Using API key from environment")
 	}
 
 	// Connect to PostgreSQL
 	dbURL := os.Getenv("WAREHOUSE_READONLY_UNIFIED_YSWS_DATABASE_URL")
 	if dbURL == "" {
-		log.Fatal("WAREHOUSE_READONLY_UNIFIED_YSWS_DATABASE_URL environment variable is required")
+		appLog.Error("WAREHOUSE_READONLY_UNIFIED_YSWS_DATABASE_URL environment variable is required")
+		os.Exit(1)
 	}
 
-	fmt.Println("Connecting to PostgreSQL...")
+	appLog.Info("Connecting to PostgreSQL...")
 	var err error
 	pgDB, err = sql.Open("postgres", dbURL)
 	if err != nil {
-		log.Fatalf("Failed to open PostgreSQL connection: %v", err)
+		appLog.Error("Failed to open PostgreSQL connection: %v", err)
+		os.Exit(1)
 	}
 	defer pgDB.Close()
 
+	// Configure connection pool
+	pgDB.SetMaxOpenConns(10)
+	pgDB.SetMaxIdleConns(5)
+	pgDB.SetConnMaxLifetime(5 * time.Minute)
+
 	if err := pgDB.Ping(); err != nil {
-		log.Fatalf("Failed to ping PostgreSQL database: %v", err)
+		appLog.Error("Failed to ping PostgreSQL database: %v", err)
+		os.Exit(1)
 	}
-	fmt.Println("✓ Connected to PostgreSQL database")
+	appLog.Info("✓ Connected to PostgreSQL database")
 
 	// Create a mux to handle all routes with authentication
 	mux := http.NewServeMux()
 	mux.HandleFunc("/db", dbHandler)
 
-	handler := authMiddleware(mux)
+	// Chain middleware: logging -> cors -> auth -> handler
+	handler := loggingMiddleware(corsMiddleware(authMiddleware(mux)))
 
 	port := ":8080"
-	fmt.Printf("Server starting on port %s\n", port)
-	fmt.Printf("API key authentication is enabled\n")
-	fmt.Printf("Visit http://localhost%s/db to download the SQLite database\n", port)
+	appLog.Info("Server starting on port %s", port)
+	appLog.Info("API key authentication is enabled")
+	appLog.Info("Endpoint: GET /db - Download SQLite database")
 
 	if err := http.ListenAndServe(port, handler); err != nil {
-		log.Fatal(err)
+		appLog.Error("Server failed: %v", err)
+		os.Exit(1)
 	}
+}
+
+// corsMiddleware adds CORS headers to allow cross-origin requests
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Allow requests from any origin (for development)
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+
+		// Handle preflight OPTIONS request
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// loggingMiddleware logs all incoming requests with timing
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		requestID := generateRequestID()
+
+		// Create a response wrapper to capture status code
+		wrapped := &responseWrapper{ResponseWriter: w, statusCode: http.StatusOK}
+
+		// Get client IP
+		clientIP := r.RemoteAddr
+		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+			clientIP = strings.Split(forwarded, ",")[0]
+		}
+
+		// Log request start
+		reqLog := &Logger{prefix: fmt.Sprintf("[%s] ", requestID)}
+		reqLog.Info("→ %s %s from %s", r.Method, r.URL.Path, clientIP)
+
+		// Process request
+		next.ServeHTTP(wrapped, r)
+
+		// Log request completion
+		duration := time.Since(start)
+		if wrapped.statusCode >= 400 {
+			reqLog.Warn("← %d %s (%s)", wrapped.statusCode, http.StatusText(wrapped.statusCode), duration)
+		} else {
+			reqLog.Info("← %d %s (%s)", wrapped.statusCode, http.StatusText(wrapped.statusCode), duration)
+		}
+	})
+}
+
+// responseWrapper captures the status code for logging
+type responseWrapper struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (rw *responseWrapper) WriteHeader(code int) {
+	rw.statusCode = code
+	rw.ResponseWriter.WriteHeader(code)
 }
 
 func authMiddleware(next http.Handler) http.Handler {
@@ -98,18 +221,31 @@ func authMiddleware(next http.Handler) http.Handler {
 		apiKeyHeader := r.Header.Get("X-API-Key")
 
 		var providedKey string
+		var authMethod string
+
 		if authHeader != "" {
 			parts := strings.Split(authHeader, " ")
 			if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
 				providedKey = parts[1]
+				authMethod = "Bearer"
 			} else {
 				providedKey = authHeader
+				authMethod = "Authorization"
 			}
 		} else if apiKeyHeader != "" {
 			providedKey = apiKeyHeader
+			authMethod = "X-API-Key"
 		}
 
-		if providedKey == "" || providedKey != apiKey {
+		if providedKey == "" {
+			appLog.Warn("Auth failed: no API key provided")
+			w.Header().Set("WWW-Authenticate", `Bearer realm="API"`)
+			http.Error(w, "Unauthorized: API key is required", http.StatusUnauthorized)
+			return
+		}
+
+		if providedKey != apiKey {
+			appLog.Warn("Auth failed: invalid API key (method: %s)", authMethod)
 			w.Header().Set("WWW-Authenticate", `Bearer realm="API"`)
 			http.Error(w, "Unauthorized: API key is required", http.StatusUnauthorized)
 			return
@@ -120,61 +256,160 @@ func authMiddleware(next http.Handler) http.Handler {
 }
 
 func dbHandler(w http.ResponseWriter, r *http.Request) {
-	// Create a temporary file for the SQLite database
-	tmpFile, err := os.CreateTemp("", "db-*.db")
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to create temp file: %v", err), http.StatusInternalServerError)
+	requestStart := time.Now()
+
+	// Check if we have a valid cached database
+	dbPath, fromCache := getCachedDB()
+	if fromCache {
+		appLog.Info("Serving cached database (age: %s)", time.Since(cacheCreatedAt).Round(time.Second))
+		serveCachedDB(w, dbPath, requestStart)
 		return
+	}
+
+	// Generate a new database
+	newPath, err := generateDB()
+	if err != nil {
+		appLog.Error("Failed to generate database: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to generate database: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	appLog.Info("Generated fresh database, caching for %s", cacheTTL)
+	serveCachedDB(w, newPath, requestStart)
+}
+
+// getCachedDB checks if we have a valid cached database and returns its path
+// Returns (path, true) if cache is valid, ("", false) if cache needs refresh
+func getCachedDB() (string, bool) {
+	cacheMutex.RLock()
+	defer cacheMutex.RUnlock()
+
+	// Check if cache exists and is still valid
+	if cachedDBPath == "" || time.Since(cacheCreatedAt) > cacheTTL {
+		return "", false
+	}
+
+	// Verify the cached file still exists
+	if _, err := os.Stat(cachedDBPath); os.IsNotExist(err) {
+		return "", false
+	}
+
+	return cachedDBPath, true
+}
+
+// generateDB creates a new SQLite database from PostgreSQL data and caches it
+func generateDB() (string, error) {
+	cacheMutex.Lock()
+	defer cacheMutex.Unlock()
+
+	// Double-check: another goroutine may have regenerated while we waited for the lock
+	if cachedDBPath != "" && time.Since(cacheCreatedAt) <= cacheTTL {
+		if _, err := os.Stat(cachedDBPath); err == nil {
+			return cachedDBPath, nil
+		}
+	}
+
+	// Remove old cached file if it exists
+	if cachedDBPath != "" {
+		os.Remove(cachedDBPath)
+	}
+
+	// Create a new file for the SQLite database (not in temp, so it persists)
+	appLog.Debug("Creating SQLite database file...")
+	tmpFile, err := os.CreateTemp("", "cached-db-*.db")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
 	tmpFile.Close()
-	defer os.Remove(tmpPath)
 
 	// Open SQLite database
 	sqliteDB, err := sql.Open("sqlite", tmpPath)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to open SQLite database: %v", err), http.StatusInternalServerError)
-		return
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("failed to open SQLite database: %w", err)
 	}
-	defer sqliteDB.Close()
 
 	// Create tables in SQLite
+	appLog.Debug("Creating SQLite tables...")
+	tableStart := time.Now()
 	if err := createSQLiteTables(sqliteDB); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to create tables: %v", err), http.StatusInternalServerError)
-		return
+		sqliteDB.Close()
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("failed to create tables: %w", err)
 	}
+	appLog.Debug("Tables created in %s", time.Since(tableStart))
 
 	// Copy data from PostgreSQL to SQLite
-	if err := copyApprovedProjects(sqliteDB); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to copy approved_projects: %v", err), http.StatusInternalServerError)
-		return
+	appLog.Info("Copying approved_projects from PostgreSQL...")
+	copyStart := time.Now()
+	projectCount, err := copyApprovedProjects(sqliteDB)
+	if err != nil {
+		sqliteDB.Close()
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("failed to copy approved_projects: %w", err)
 	}
+	appLog.Info("Copied %d approved_projects in %s", projectCount, time.Since(copyStart))
 
-	if err := copyProjectMentions(sqliteDB); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to copy ysws_project_mentions: %v", err), http.StatusInternalServerError)
-		return
+	appLog.Info("Copying ysws_project_mentions from PostgreSQL...")
+	copyStart = time.Now()
+	mentionCount, err := copyProjectMentions(sqliteDB)
+	if err != nil {
+		sqliteDB.Close()
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("failed to copy ysws_project_mentions: %w", err)
 	}
+	appLog.Info("Copied %d ysws_project_mentions in %s", mentionCount, time.Since(copyStart))
 
 	// Close SQLite to flush all data
 	sqliteDB.Close()
 
+	// Get file size
+	fileInfo, err := os.Stat(tmpPath)
+	if err == nil {
+		appLog.Info("SQLite database size: %.2f MB, total rows: %d", float64(fileInfo.Size())/(1024*1024), projectCount+mentionCount)
+	}
+
+	// Update cache
+	cachedDBPath = tmpPath
+	cacheCreatedAt = time.Now()
+
+	return tmpPath, nil
+}
+
+// serveCachedDB sends the cached database file to the client
+func serveCachedDB(w http.ResponseWriter, dbPath string, requestStart time.Time) {
 	// Open the file for reading
-	file, err := os.Open(tmpPath)
+	file, err := os.Open(dbPath)
 	if err != nil {
+		appLog.Error("Failed to open file for reading: %v", err)
 		http.Error(w, fmt.Sprintf("Failed to open file for reading: %v", err), http.StatusInternalServerError)
 		return
 	}
 	defer file.Close()
 
+	// Get file info for size
+	fileInfo, err := file.Stat()
+	if err != nil {
+		appLog.Error("Failed to stat file: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to stat file: %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	// Set headers for file download
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", `attachment; filename="database.db"`)
 	w.Header().Set("Content-Transfer-Encoding", "binary")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", fileInfo.Size()))
 
 	// Copy file contents to response
-	if _, err := io.Copy(w, file); err != nil {
-		log.Printf("Error writing response: %v", err)
+	bytesSent, err := io.Copy(w, file)
+	if err != nil {
+		appLog.Error("Error writing response: %v", err)
+		return
 	}
+
+	appLog.Info("Database sent: %.2f MB in %s", float64(bytesSent)/(1024*1024), time.Since(requestStart))
 }
 
 func createSQLiteTables(db *sql.DB) error {
@@ -222,16 +457,21 @@ func createSQLiteTables(db *sql.DB) error {
 		return fmt.Errorf("creating ysws_project_mentions table: %w", err)
 	}
 
-	// Create index for joining tables
+	// Create indexes for efficient queries
 	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_mentions_record_id ON ysws_project_mentions(record_id)`)
 	if err != nil {
-		return fmt.Errorf("creating index: %w", err)
+		return fmt.Errorf("creating record_id index: %w", err)
+	}
+
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_mentions_approved_project ON ysws_project_mentions(ysws_approved_project)`)
+	if err != nil {
+		return fmt.Errorf("creating ysws_approved_project index: %w", err)
 	}
 
 	return nil
 }
 
-func copyApprovedProjects(sqliteDB *sql.DB) error {
+func copyApprovedProjects(sqliteDB *sql.DB) (int, error) {
 	// Query PostgreSQL for approved_projects data
 	rows, err := pgDB.Query(`
 		SELECT 
@@ -246,19 +486,26 @@ func copyApprovedProjects(sqliteDB *sql.DB) error {
 		FROM airtable_unified_ysws_projects_db.approved_projects
 	`)
 	if err != nil {
-		return fmt.Errorf("querying PostgreSQL: %w", err)
+		return 0, fmt.Errorf("querying PostgreSQL: %w", err)
 	}
 	defer rows.Close()
 
+	// Begin transaction for faster inserts
+	tx, err := sqliteDB.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("beginning transaction: %w", err)
+	}
+
 	// Prepare SQLite insert statement
-	stmt, err := sqliteDB.Prepare(`
+	stmt, err := tx.Prepare(`
 		INSERT INTO approved_projects (
 			record_id, first_name, git_hub_username, geocoded_country,
 			hack_clubber_geocoded_country, geocoded_country_code, playable_url, code_url
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
-		return fmt.Errorf("preparing insert statement: %w", err)
+		tx.Rollback()
+		return 0, fmt.Errorf("preparing insert statement: %w", err)
 	}
 	defer stmt.Close()
 
@@ -272,7 +519,8 @@ func copyApprovedProjects(sqliteDB *sql.DB) error {
 			&hackClubberGeocodedCountry, &geocodedCountryCode, &playableURL, &codeURL,
 		)
 		if err != nil {
-			return fmt.Errorf("scanning row: %w", err)
+			tx.Rollback()
+			return 0, fmt.Errorf("scanning row: %w", err)
 		}
 
 		_, err = stmt.Exec(
@@ -282,16 +530,20 @@ func copyApprovedProjects(sqliteDB *sql.DB) error {
 			nullStringToPtr(playableURL), nullStringToPtr(codeURL),
 		)
 		if err != nil {
-			return fmt.Errorf("inserting row: %w", err)
+			tx.Rollback()
+			return 0, fmt.Errorf("inserting row: %w", err)
 		}
 		count++
 	}
 
-	log.Printf("Copied %d rows to approved_projects", count)
-	return nil
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("committing transaction: %w", err)
+	}
+
+	return count, nil
 }
 
-func copyProjectMentions(sqliteDB *sql.DB) error {
+func copyProjectMentions(sqliteDB *sql.DB) (int, error) {
 	// Query PostgreSQL for ysws_project_mentions data
 	rows, err := pgDB.Query(`
 		SELECT 
@@ -316,12 +568,18 @@ func copyProjectMentions(sqliteDB *sql.DB) error {
 		FROM airtable_unified_ysws_projects_db.ysws_project_mentions
 	`)
 	if err != nil {
-		return fmt.Errorf("querying PostgreSQL: %w", err)
+		return 0, fmt.Errorf("querying PostgreSQL: %w", err)
 	}
 	defer rows.Close()
 
+	// Begin transaction for faster inserts
+	tx, err := sqliteDB.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("beginning transaction: %w", err)
+	}
+
 	// Prepare SQLite insert statement
-	stmt, err := sqliteDB.Prepare(`
+	stmt, err := tx.Prepare(`
 		INSERT INTO ysws_project_mentions (
 			id, ysws_project_mentions_id, ysws_project_mention_searches,
 			ysws_from_ysws_approved_project, record_id, ysws_approved_project,
@@ -331,7 +589,8 @@ func copyProjectMentions(sqliteDB *sql.DB) error {
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
-		return fmt.Errorf("preparing insert statement: %w", err)
+		tx.Rollback()
+		return 0, fmt.Errorf("preparing insert statement: %w", err)
 	}
 	defer stmt.Close()
 
@@ -353,7 +612,8 @@ func copyProjectMentions(sqliteDB *sql.DB) error {
 			&engagementType, &mentionsHackClub, &publishedByHackClub,
 		)
 		if err != nil {
-			return fmt.Errorf("scanning row: %w", err)
+			tx.Rollback()
+			return 0, fmt.Errorf("scanning row: %w", err)
 		}
 
 		_, err = stmt.Exec(
@@ -368,13 +628,17 @@ func copyProjectMentions(sqliteDB *sql.DB) error {
 			nullBoolToInt(mentionsHackClub), nullBoolToInt(publishedByHackClub),
 		)
 		if err != nil {
-			return fmt.Errorf("inserting row: %w", err)
+			tx.Rollback()
+			return 0, fmt.Errorf("inserting row: %w", err)
 		}
 		count++
 	}
 
-	log.Printf("Copied %d rows to ysws_project_mentions", count)
-	return nil
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("committing transaction: %w", err)
+	}
+
+	return count, nil
 }
 
 func nullStringToPtr(ns sql.NullString) interface{} {

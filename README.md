@@ -166,3 +166,4 @@ The server starts on port `8080` by default.
 | `WAREHOUSE_READONLY_UNIFIED_YSWS_DATABASE_URL` | Yes | PostgreSQL connection string |
 | `API_KEY` | No | API key for authentication (auto-generated if not set) |
 
+

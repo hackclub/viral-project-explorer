@@ -2,11 +2,21 @@
 	import { onMount } from 'svelte';
 
 	const API_KEY_STORAGE_KEY = 'api_key';
+	const BACKEND_URL = 'http://localhost:8080';
+
+	// sql.js will be dynamically imported in loadDatabase
 
 	let apiKey = '';
 	let inputValue = '';
 	let showKey = false;
 	let isEditing = false;
+
+	// Database state
+	let db = null;
+	let isLoading = false;
+	let loadError = '';
+	let approvedProjects = [];
+	let projectMentions = [];
 
 	onMount(() => {
 		const stored = localStorage.getItem(API_KEY_STORAGE_KEY);
@@ -21,6 +31,11 @@
 			localStorage.setItem(API_KEY_STORAGE_KEY, apiKey);
 			inputValue = '';
 			isEditing = false;
+			// Clear previous data when API key changes
+			db = null;
+			approvedProjects = [];
+			projectMentions = [];
+			loadError = '';
 		}
 	}
 
@@ -28,6 +43,11 @@
 		apiKey = '';
 		localStorage.removeItem(API_KEY_STORAGE_KEY);
 		showKey = false;
+		// Clear database data
+		db = null;
+		approvedProjects = [];
+		projectMentions = [];
+		loadError = '';
 	}
 
 	function startEditing() {
@@ -52,6 +72,82 @@
 			saveApiKey();
 		} else if (event.key === 'Escape') {
 			cancelEditing();
+		}
+	}
+
+	async function loadDatabase() {
+		if (!apiKey) return;
+
+		isLoading = true;
+		loadError = '';
+		approvedProjects = [];
+		projectMentions = [];
+
+		try {
+			// Fetch the SQLite database from the backend
+			const response = await fetch(`${BACKEND_URL}/db`, {
+				headers: {
+					'X-API-Key': apiKey
+				}
+			});
+
+			if (!response.ok) {
+				if (response.status === 401) {
+					throw new Error('Invalid API key. Please check your API key and try again.');
+				}
+				throw new Error(`Failed to fetch database: ${response.status} ${response.statusText}`);
+			}
+
+			const arrayBuffer = await response.arrayBuffer();
+			const uint8Array = new Uint8Array(arrayBuffer);
+
+			// Load sql.js from CDN (more reliable than npm for WASM libraries)
+			if (typeof window.initSqlJs === 'undefined') {
+				await new Promise((resolve, reject) => {
+					const script = document.createElement('script');
+					script.src = 'https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.min.js';
+					script.onload = resolve;
+					script.onerror = () => reject(new Error('Failed to load sql.js from CDN'));
+					document.head.appendChild(script);
+				});
+			}
+			const SQL = await window.initSqlJs({
+				locateFile: (file) => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/${file}`
+			});
+
+			// Load the database
+			db = new SQL.Database(uint8Array);
+
+			// Query first 10 rows from approved_projects
+			const projectsResult = db.exec('SELECT * FROM approved_projects LIMIT 10');
+			if (projectsResult.length > 0) {
+				const columns = projectsResult[0].columns;
+				approvedProjects = projectsResult[0].values.map(row => {
+					const obj = {};
+					columns.forEach((col, i) => {
+						obj[col] = row[i];
+					});
+					return obj;
+				});
+			}
+
+			// Query first 10 rows from ysws_project_mentions
+			const mentionsResult = db.exec('SELECT * FROM ysws_project_mentions LIMIT 10');
+			if (mentionsResult.length > 0) {
+				const columns = mentionsResult[0].columns;
+				projectMentions = mentionsResult[0].values.map(row => {
+					const obj = {};
+					columns.forEach((col, i) => {
+						obj[col] = row[i];
+					});
+					return obj;
+				});
+			}
+		} catch (err) {
+			loadError = err.message;
+			console.error('Error loading database:', err);
+		} finally {
+			isLoading = false;
 		}
 	}
 </script>
@@ -111,13 +207,95 @@
 			<p class="status">✓ API key configured</p>
 		{/if}
 	</div>
+
+	{#if apiKey && !isEditing}
+		<div class="data-section">
+			<button class="primary load-btn" on:click={loadDatabase} disabled={isLoading}>
+				{isLoading ? 'Loading...' : 'Load Database'}
+			</button>
+
+			{#if loadError}
+				<div class="error-message">
+					{loadError}
+				</div>
+			{/if}
+
+			{#if approvedProjects.length > 0}
+				<div class="table-container">
+					<h2>Approved Projects (First 10)</h2>
+					<div class="table-wrapper">
+						<table>
+							<thead>
+								<tr>
+									{#each Object.keys(approvedProjects[0]) as column}
+										<th>{column}</th>
+									{/each}
+								</tr>
+							</thead>
+							<tbody>
+								{#each approvedProjects as row}
+									<tr>
+										{#each Object.values(row) as value}
+											<td>
+												{#if value && (String(value).startsWith('http://') || String(value).startsWith('https://'))}
+													<a href={value} target="_blank" rel="noopener noreferrer">
+														{String(value).length > 40 ? String(value).slice(0, 40) + '...' : value}
+													</a>
+												{:else}
+													{value ?? '—'}
+												{/if}
+											</td>
+										{/each}
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				</div>
+			{/if}
+
+			{#if projectMentions.length > 0}
+				<div class="table-container">
+					<h2>Project Mentions (First 10)</h2>
+					<div class="table-wrapper">
+						<table>
+							<thead>
+								<tr>
+									{#each Object.keys(projectMentions[0]) as column}
+										<th>{column}</th>
+									{/each}
+								</tr>
+							</thead>
+							<tbody>
+								{#each projectMentions as row}
+									<tr>
+										{#each Object.values(row) as value}
+											<td>
+												{#if value && (String(value).startsWith('http://') || String(value).startsWith('https://'))}
+													<a href={value} target="_blank" rel="noopener noreferrer">
+														{String(value).length > 40 ? String(value).slice(0, 40) + '...' : value}
+													</a>
+												{:else}
+													{value ?? '—'}
+												{/if}
+											</td>
+										{/each}
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				</div>
+			{/if}
+		</div>
+	{/if}
 </main>
 
 <style>
 	main {
 		text-align: center;
 		padding: 2em;
-		max-width: 500px;
+		max-width: 100%;
 		margin: 0 auto;
 	}
 
@@ -141,6 +319,9 @@
 		border-radius: 12px;
 		padding: 1.5em;
 		margin-top: 2em;
+		max-width: 500px;
+		margin-left: auto;
+		margin-right: auto;
 	}
 
 	.hint {
@@ -261,6 +442,81 @@
 		margin-bottom: 0;
 	}
 
+	/* Data section styles */
+	.data-section {
+		margin-top: 2em;
+	}
+
+	.load-btn {
+		padding: 0.8em 2em;
+		font-size: 1em;
+	}
+
+	.error-message {
+		background: rgba(220, 53, 69, 0.15);
+		border: 1px solid rgba(220, 53, 69, 0.3);
+		color: #ff6b7a;
+		padding: 1em;
+		border-radius: 8px;
+		margin-top: 1em;
+		max-width: 500px;
+		margin-left: auto;
+		margin-right: auto;
+	}
+
+	.table-container {
+		margin-top: 2em;
+		text-align: left;
+	}
+
+	.table-container h2 {
+		text-align: center;
+		margin-bottom: 1em;
+		color: #ff3e00;
+	}
+
+	.table-wrapper {
+		overflow-x: auto;
+		border-radius: 8px;
+		border: 1px solid rgba(255, 255, 255, 0.1);
+	}
+
+	table {
+		width: 100%;
+		border-collapse: collapse;
+		font-size: 0.85em;
+	}
+
+	th, td {
+		padding: 0.75em 1em;
+		text-align: left;
+		border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+		white-space: nowrap;
+		max-width: 300px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	th {
+		background: rgba(255, 255, 255, 0.05);
+		font-weight: 600;
+		position: sticky;
+		top: 0;
+		color: #ff3e00;
+	}
+
+	tr:hover {
+		background: rgba(255, 255, 255, 0.02);
+	}
+
+	td a {
+		color: #646cff;
+	}
+
+	td a:hover {
+		color: #535bf2;
+	}
+
 	@media (prefers-color-scheme: light) {
 		.api-key-section {
 			background: rgba(0, 0, 0, 0.03);
@@ -291,6 +547,22 @@
 
 		.key-display {
 			background: rgba(0, 0, 0, 0.05);
+		}
+
+		.table-wrapper {
+			border-color: rgba(0, 0, 0, 0.1);
+		}
+
+		th, td {
+			border-bottom-color: rgba(0, 0, 0, 0.1);
+		}
+
+		th {
+			background: rgba(0, 0, 0, 0.03);
+		}
+
+		tr:hover {
+			background: rgba(0, 0, 0, 0.02);
 		}
 	}
 </style>

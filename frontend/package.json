@@ -18,10 +18,9 @@
 		"typescript": "^5.0.0",
 		"vite": "^5.0.0"
 	},
-	"type": "module"
+	"type": "module",
+	"dependencies": {
+		"sql.js": "^1.13.0"
+	}
 }
-
-
-
-
 

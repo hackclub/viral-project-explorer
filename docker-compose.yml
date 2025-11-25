@@ -13,12 +13,7 @@ services:
       - ./backend:/app
       - /app/tmp
       - backend_go_cache:/go/pkg/mod
-    environment:
-      - WAREHOUSE_READONLY_UNIFIED_YSWS_DATABASE_URL=${WAREHOUSE_READONLY_UNIFIED_YSWS_DATABASE_URL}
-      - API_KEY=${API_KEY:-}
-    env_file:
-      - path: .env
-        required: false
+    # Environment loaded from backend/.env via godotenv in Go code
     restart: unless-stopped
 
   frontend:

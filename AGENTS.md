@@ -37,10 +37,12 @@ The project uses Docker Compose with two services:
 ### Prerequisites
 
 1. Docker and Docker Compose must be installed
-2. Create a `.env` file in the project root with required environment variables:
+2. Create a `.env` file in `backend/` with required environment variables:
 
 ```bash
-# Required for backend
+# backend/.env
+
+# Required
 WAREHOUSE_READONLY_UNIFIED_YSWS_DATABASE_URL=postgres://...
 
 # Optional - auto-generated if not set
@@ -239,7 +241,6 @@ viral-project-explorer/
 │   ├── Dockerfile.dev         # Development container
 │   └── vite.config.js         # Vite configuration
 ├── docker-compose.yml         # Development orchestration
-├── .env                       # Environment variables (create this)
 └── AGENTS.md                  # This file
 ```
 
@@ -264,5 +265,5 @@ viral-project-explorer/
 3. **Use logs to verify changes took effect**: `docker compose logs -f <service>`
 4. **If you need a fresh start**, use `docker compose down && docker compose up -d --build`
 5. **Multiple agents can work simultaneously** since live reload eliminates the need to restart services
-6. **Environment variables** are in `.env` at project root — backend reads from there automatically
+6. **Environment variables** are in `backend/.env` — the Go app loads them via godotenv
 
