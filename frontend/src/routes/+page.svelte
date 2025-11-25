@@ -91,9 +91,12 @@
 			params.push(selectedCountry);
 		}
 		
+		// Sanitize minMentions to ensure it's a non-negative integer
+		const sanitizedMinMentions = Math.max(0, Math.floor(Number(minMentions) || 0));
+		
 		// Get total count with filter (including min mentions)
 		let countQuery;
-		if (minMentions > 0) {
+		if (sanitizedMinMentions > 0) {
 			countQuery = queryAll(`
 				SELECT COUNT(*) as count FROM (
 					SELECT ap.code_url
@@ -101,9 +104,9 @@
 					LEFT JOIN ysws_project_mentions m ON m.ysws_approved_project = ap.record_id
 					WHERE ${whereClause}
 					GROUP BY ap.code_url
-					HAVING COUNT(DISTINCT m.url) >= ${minMentions}
+					HAVING COUNT(DISTINCT m.url) >= ?
 				)
-			`, params);
+			`, [...params, sanitizedMinMentions]);
 		} else {
 			countQuery = queryAll(`SELECT COUNT(DISTINCT code_url) as count FROM approved_projects ap WHERE ${whereClause}`, params);
 		}
@@ -111,7 +114,7 @@
 		
 		// Get total hours for weighted projects calculation
 		let hoursQuery;
-		if (minMentions > 0) {
+		if (sanitizedMinMentions > 0) {
 			hoursQuery = queryAll(`
 				SELECT SUM(hours_spent) as total_hours FROM approved_projects ap
 				WHERE ${whereClause} AND ap.code_url IN (
@@ -119,9 +122,9 @@
 					FROM approved_projects ap2
 					LEFT JOIN ysws_project_mentions m ON m.ysws_approved_project = ap2.record_id
 					GROUP BY ap2.code_url
-					HAVING COUNT(DISTINCT m.url) >= ${minMentions}
+					HAVING COUNT(DISTINCT m.url) >= ?
 				)
-			`, params);
+			`, [...params, sanitizedMinMentions]);
 		} else {
 			hoursQuery = queryAll(`SELECT SUM(hours_spent) as total_hours FROM approved_projects ap WHERE ${whereClause}`, params);
 		}
@@ -130,6 +133,14 @@
 		// Load first batch
 		await loadMoreCodeUrls();
 	}
+
+	// Allowlist of valid ORDER BY clauses to prevent SQL injection
+	/** @type {Record<string, string>} */
+	const ORDER_BY_ALLOWLIST = {
+		'date': 'latest_approved_at DESC, code_url ASC',
+		'hours': 'total_hours DESC, latest_approved_at DESC',
+		'mentions': 'article_count DESC, latest_approved_at DESC'
+	};
 
 	async function loadMoreCodeUrls() {
 		if (isLoadingMore || loadedCodeUrlsCount >= totalCodeUrls) return;
@@ -153,21 +164,21 @@
 			params.push(selectedCountry);
 		}
 		
-		// Build HAVING clause for min mentions filter
-		let havingClause = minMentions > 0 ? `HAVING article_count >= ${minMentions}` : '';
+		// Sanitize minMentions to ensure it's a non-negative integer
+		const sanitizedMinMentions = Math.max(0, Math.floor(Number(minMentions) || 0));
 		
-		// Build ORDER BY clause based on sort option
-		let orderBy;
-		switch (sortBy) {
-			case 'hours':
-				orderBy = 'total_hours DESC, latest_approved_at DESC';
-				break;
-			case 'mentions':
-				orderBy = 'article_count DESC, latest_approved_at DESC';
-				break;
-			default:
-				orderBy = 'latest_approved_at DESC, code_url ASC';
+		// Build HAVING clause for min mentions filter (using parameterized query)
+		let havingClause = sanitizedMinMentions > 0 ? `HAVING article_count >= ?` : '';
+		
+		// Validate sortBy against allowlist and get safe ORDER BY clause
+		const orderBy = ORDER_BY_ALLOWLIST[sortBy] || ORDER_BY_ALLOWLIST['date'];
+		
+		// Build params array: WHERE params + [minMentions if applicable] + LIMIT/OFFSET
+		let queryParams = [...params];
+		if (sanitizedMinMentions > 0) {
+			queryParams.push(sanitizedMinMentions);
 		}
+		queryParams.push(CODE_URL_BATCH_SIZE, loadedCodeUrlsCount);
 		
 		const newUrls = queryAll(`
 			SELECT 
@@ -185,7 +196,7 @@
 			${havingClause}
 			ORDER BY ${orderBy}
 			LIMIT ? OFFSET ?
-		`, [...params, CODE_URL_BATCH_SIZE, loadedCodeUrlsCount]);
+		`, queryParams);
 		
 		codeUrls = [...codeUrls, ...newUrls];
 		loadedCodeUrlsCount += newUrls.length;
