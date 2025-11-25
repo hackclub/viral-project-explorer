@@ -167,9 +167,25 @@ The server starts on port `8080` by default.
 
 ## Environment Variables
 
+### Backend (`backend/.env`)
+
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `WAREHOUSE_READONLY_UNIFIED_YSWS_DATABASE_URL` | Yes | PostgreSQL connection string |
 | `API_KEY` | No | API key for authentication (auto-generated if not set) |
 
+### Frontend (`frontend/.env`)
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `PUBLIC_BACKEND_URL` | No | `http://localhost:8080` | Backend API URL for fetching the database |
+
+**Note:** Frontend environment variables prefixed with `PUBLIC_` are exposed to the client browser. Create a `frontend/.env` file:
+
+```bash
+# frontend/.env
+PUBLIC_BACKEND_URL=http://localhost:8080
+```
+
+For Docker Compose development, the `PUBLIC_BACKEND_URL` is automatically set in `docker-compose.yml`.
 

@@ -28,6 +28,7 @@ services:
       - /app/node_modules
     environment:
       - NODE_ENV=development
+      - PUBLIC_BACKEND_URL=http://localhost:8080
     restart: unless-stopped
 
 volumes:
