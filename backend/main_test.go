@@ -69,12 +69,33 @@ func TestNormalizeURL(t *testing.T) {
 		{
 			name:     "remove /tree/branch from GitHub URL",
 			input:    sql.NullString{String: "https://github.com/user/my-project/tree/master", Valid: true},
-			expected: "https://github.com/user/my-project/",
+			expected: "https://github.com/user/my-project",
 		},
 		{
 			name:     "remove /tree/branch with nested path from GitHub URL",
 			input:    sql.NullString{String: "https://github.com/user/repo/tree/main/src/components", Valid: true},
-			expected: "https://github.com/user/repo/",
+			expected: "https://github.com/user/repo",
+		},
+		// Trailing slash normalization tests
+		{
+			name:     "remove trailing slash from GitHub repo URL",
+			input:    sql.NullString{String: "https://github.com/someuser/somerepo/", Valid: true},
+			expected: "https://github.com/someuser/somerepo",
+		},
+		{
+			name:     "URL without trailing slash stays the same",
+			input:    sql.NullString{String: "https://github.com/someuser/somerepo", Valid: true},
+			expected: "https://github.com/someuser/somerepo",
+		},
+		{
+			name:     "remove multiple trailing slashes",
+			input:    sql.NullString{String: "https://github.com/someuser/somerepo///", Valid: true},
+			expected: "https://github.com/someuser/somerepo",
+		},
+		{
+			name:     "trailing slash with .git suffix",
+			input:    sql.NullString{String: "https://github.com/someuser/somerepo.git/", Valid: true},
+			expected: "https://github.com/someuser/somerepo",
 		},
 		{
 			name:     "preserve /blob/ path in GitHub URL",

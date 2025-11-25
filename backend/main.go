@@ -828,6 +828,7 @@ var dangerousSchemes = []string{
 // - Adding https:// prefix if no scheme is present
 // - Removing .git suffix (for GitHub clone URLs)
 // - Removing /tree/... paths from GitHub URLs (branch references)
+// - Removing trailing slashes (so /repo and /repo/ are treated the same)
 func normalizeURL(ns sql.NullString) interface{} {
 	if !ns.Valid || ns.String == "" {
 		return nil
@@ -853,6 +854,11 @@ func normalizeURL(ns sql.NullString) interface{} {
 		url = "https://" + url
 	}
 
+	// Remove trailing slashes for consistent comparison
+	// (e.g., github.com/user/repo/ and github.com/user/repo should be the same)
+	// This must happen before .git removal so that .git/ is handled correctly
+	url = strings.TrimRight(url, "/")
+
 	// Remove .git suffix (common in GitHub clone URLs)
 	url = strings.TrimSuffix(url, ".git")
 
@@ -860,7 +866,7 @@ func normalizeURL(ns sql.NullString) interface{} {
 	// Keep /blob/... paths intact as they reference specific files
 	if strings.Contains(url, "github.com/") {
 		if idx := strings.Index(url, "/tree/"); idx != -1 {
-			url = url[:idx] + "/"
+			url = url[:idx]
 		}
 	}
 
