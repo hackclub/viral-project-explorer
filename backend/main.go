@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/klauspost/compress/zstd"
 	_ "github.com/lib/pq"
 	_ "modernc.org/sqlite"
 )
@@ -22,11 +23,11 @@ var (
 	apiKey string
 	pgDB   *sql.DB
 
-	// Cache for the generated SQLite database
-	cacheMutex     sync.RWMutex
-	cachedDBPath   string
-	cacheCreatedAt time.Time
-	cacheTTL       = 5 * time.Minute
+	// Cache for the generated SQLite database (zstd compressed)
+	cacheMutex           sync.RWMutex
+	cachedCompressedPath string
+	cacheCreatedAt       time.Time
+	cacheTTL             = 5 * time.Minute
 )
 
 // Custom logger with timestamps
@@ -278,40 +279,40 @@ func dbHandler(w http.ResponseWriter, r *http.Request) {
 	serveCachedDB(w, newPath, requestStart)
 }
 
-// getCachedDB checks if we have a valid cached database and returns its path
+// getCachedDB checks if we have a valid cached compressed database and returns its path
 // Returns (path, true) if cache is valid, ("", false) if cache needs refresh
 func getCachedDB() (string, bool) {
 	cacheMutex.RLock()
 	defer cacheMutex.RUnlock()
 
 	// Check if cache exists and is still valid
-	if cachedDBPath == "" || time.Since(cacheCreatedAt) > cacheTTL {
+	if cachedCompressedPath == "" || time.Since(cacheCreatedAt) > cacheTTL {
 		return "", false
 	}
 
 	// Verify the cached file still exists
-	if _, err := os.Stat(cachedDBPath); os.IsNotExist(err) {
+	if _, err := os.Stat(cachedCompressedPath); os.IsNotExist(err) {
 		return "", false
 	}
 
-	return cachedDBPath, true
+	return cachedCompressedPath, true
 }
 
-// generateDB creates a new SQLite database from PostgreSQL data and caches it
+// generateDB creates a new SQLite database from PostgreSQL data, compresses it with zstd, and caches it
 func generateDB() (string, error) {
 	cacheMutex.Lock()
 	defer cacheMutex.Unlock()
 
 	// Double-check: another goroutine may have regenerated while we waited for the lock
-	if cachedDBPath != "" && time.Since(cacheCreatedAt) <= cacheTTL {
-		if _, err := os.Stat(cachedDBPath); err == nil {
-			return cachedDBPath, nil
+	if cachedCompressedPath != "" && time.Since(cacheCreatedAt) <= cacheTTL {
+		if _, err := os.Stat(cachedCompressedPath); err == nil {
+			return cachedCompressedPath, nil
 		}
 	}
 
 	// Remove old cached file if it exists
-	if cachedDBPath != "" {
-		os.Remove(cachedDBPath)
+	if cachedCompressedPath != "" {
+		os.Remove(cachedCompressedPath)
 	}
 
 	// Create a new file for the SQLite database (not in temp, so it persists)
@@ -364,23 +365,89 @@ func generateDB() (string, error) {
 	// Close SQLite to flush all data
 	sqliteDB.Close()
 
-	// Get file size
+	// Get uncompressed file size
 	fileInfo, err := os.Stat(tmpPath)
+	var uncompressedSize int64
 	if err == nil {
-		appLog.Info("SQLite database size: %.2f MB, total rows: %d", float64(fileInfo.Size())/(1024*1024), projectCount+mentionCount)
+		uncompressedSize = fileInfo.Size()
+		appLog.Info("SQLite database size (uncompressed): %.2f MB, total rows: %d", float64(uncompressedSize)/(1024*1024), projectCount+mentionCount)
+	}
+
+	// Compress the database with zstd
+	appLog.Info("Compressing database with zstd...")
+	compressStart := time.Now()
+	compressedPath, err := compressWithZstd(tmpPath)
+	if err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("failed to compress database: %w", err)
+	}
+
+	// Remove the uncompressed file
+	os.Remove(tmpPath)
+
+	// Get compressed file size
+	compressedInfo, err := os.Stat(compressedPath)
+	if err == nil {
+		compressedSize := compressedInfo.Size()
+		ratio := float64(uncompressedSize) / float64(compressedSize)
+		appLog.Info("Compressed database size: %.2f MB (%.1fx compression) in %s",
+			float64(compressedSize)/(1024*1024), ratio, time.Since(compressStart))
 	}
 
 	// Update cache
-	cachedDBPath = tmpPath
+	cachedCompressedPath = compressedPath
 	cacheCreatedAt = time.Now()
 
-	return tmpPath, nil
+	return compressedPath, nil
 }
 
-// serveCachedDB sends the cached database file to the client
-func serveCachedDB(w http.ResponseWriter, dbPath string, requestStart time.Time) {
+// compressWithZstd compresses a file using zstd and returns the path to the compressed file
+func compressWithZstd(inputPath string) (string, error) {
+	// Create output file
+	outputPath := inputPath + ".zst"
+	outputFile, err := os.Create(outputPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer outputFile.Close()
+
+	// Create zstd encoder with best compression
+	encoder, err := zstd.NewWriter(outputFile, zstd.WithEncoderLevel(zstd.SpeedBestCompression))
+	if err != nil {
+		os.Remove(outputPath)
+		return "", fmt.Errorf("failed to create zstd encoder: %w", err)
+	}
+
+	// Open input file
+	inputFile, err := os.Open(inputPath)
+	if err != nil {
+		encoder.Close()
+		os.Remove(outputPath)
+		return "", fmt.Errorf("failed to open input file: %w", err)
+	}
+	defer inputFile.Close()
+
+	// Copy and compress
+	_, err = io.Copy(encoder, inputFile)
+	if err != nil {
+		encoder.Close()
+		os.Remove(outputPath)
+		return "", fmt.Errorf("failed to compress: %w", err)
+	}
+
+	// Close encoder to flush all data
+	if err := encoder.Close(); err != nil {
+		os.Remove(outputPath)
+		return "", fmt.Errorf("failed to close encoder: %w", err)
+	}
+
+	return outputPath, nil
+}
+
+// serveCachedDB sends the cached zstd-compressed database file to the client
+func serveCachedDB(w http.ResponseWriter, compressedPath string, requestStart time.Time) {
 	// Open the file for reading
-	file, err := os.Open(dbPath)
+	file, err := os.Open(compressedPath)
 	if err != nil {
 		appLog.Error("Failed to open file for reading: %v", err)
 		http.Error(w, fmt.Sprintf("Failed to open file for reading: %v", err), http.StatusInternalServerError)
@@ -396,9 +463,9 @@ func serveCachedDB(w http.ResponseWriter, dbPath string, requestStart time.Time)
 		return
 	}
 
-	// Set headers for file download
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", `attachment; filename="database.db"`)
+	// Set headers for zstd-compressed file download
+	w.Header().Set("Content-Type", "application/zstd")
+	w.Header().Set("Content-Disposition", `attachment; filename="database.db.zst"`)
 	w.Header().Set("Content-Transfer-Encoding", "binary")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", fileInfo.Size()))
 
@@ -409,7 +476,7 @@ func serveCachedDB(w http.ResponseWriter, dbPath string, requestStart time.Time)
 		return
 	}
 
-	appLog.Info("Database sent: %.2f MB in %s", float64(bytesSent)/(1024*1024), time.Since(requestStart))
+	appLog.Info("Compressed database sent: %.2f MB in %s", float64(bytesSent)/(1024*1024), time.Since(requestStart))
 }
 
 func createSQLiteTables(db *sql.DB) error {

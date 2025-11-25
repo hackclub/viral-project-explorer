@@ -20,7 +20,7 @@
 	},
 	"type": "module",
 	"dependencies": {
-		"sql.js": "^1.13.0"
+		"fzstd": "^0.1.1"
 	}
 }
 

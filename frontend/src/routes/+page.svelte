@@ -1,27 +1,36 @@
 <script>
 	import { onMount } from 'svelte';
+	import { 
+		db, 
+		dbReady, 
+		isLoading, 
+		loadError, 
+		lastLoaded,
+		loadDatabase, 
+		loadFromCache,
+		queryAll 
+	} from '$lib/db';
 
 	const API_KEY_STORAGE_KEY = 'api_key';
-	const BACKEND_URL = 'http://localhost:8080';
-
-	// sql.js will be dynamically imported in loadDatabase
 
 	let apiKey = '';
 	let inputValue = '';
 	let showKey = false;
 	let isEditing = false;
 
-	// Database state
-	let db = null;
-	let isLoading = false;
-	let loadError = '';
+	// Database display state
 	let approvedProjects = [];
 	let projectMentions = [];
 
-	onMount(() => {
+	onMount(async () => {
 		const stored = localStorage.getItem(API_KEY_STORAGE_KEY);
 		if (stored) {
 			apiKey = stored;
+			// Try to load from cache first
+			const loadedFromCache = await loadFromCache();
+			if (loadedFromCache) {
+				loadTableData();
+			}
 		}
 	});
 
@@ -32,10 +41,8 @@
 			inputValue = '';
 			isEditing = false;
 			// Clear previous data when API key changes
-			db = null;
 			approvedProjects = [];
 			projectMentions = [];
-			loadError = '';
 		}
 	}
 
@@ -44,10 +51,8 @@
 		localStorage.removeItem(API_KEY_STORAGE_KEY);
 		showKey = false;
 		// Clear database data
-		db = null;
 		approvedProjects = [];
 		projectMentions = [];
-		loadError = '';
 	}
 
 	function startEditing() {
@@ -75,80 +80,45 @@
 		}
 	}
 
-	async function loadDatabase() {
-		if (!apiKey) return;
-
-		isLoading = true;
-		loadError = '';
-		approvedProjects = [];
-		projectMentions = [];
-
-		try {
-			// Fetch the SQLite database from the backend
-			const response = await fetch(`${BACKEND_URL}/db`, {
-				headers: {
-					'X-API-Key': apiKey
-				}
-			});
-
-			if (!response.ok) {
-				if (response.status === 401) {
-					throw new Error('Invalid API key. Please check your API key and try again.');
-				}
-				throw new Error(`Failed to fetch database: ${response.status} ${response.statusText}`);
-			}
-
-			const arrayBuffer = await response.arrayBuffer();
-			const uint8Array = new Uint8Array(arrayBuffer);
-
-			// Load sql.js from CDN (more reliable than npm for WASM libraries)
-			if (typeof window.initSqlJs === 'undefined') {
-				await new Promise((resolve, reject) => {
-					const script = document.createElement('script');
-					script.src = 'https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.min.js';
-					script.onload = resolve;
-					script.onerror = () => reject(new Error('Failed to load sql.js from CDN'));
-					document.head.appendChild(script);
-				});
-			}
-			const SQL = await window.initSqlJs({
-				locateFile: (file) => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/${file}`
-			});
-
-			// Load the database
-			db = new SQL.Database(uint8Array);
-
-			// Query first 10 rows from approved_projects
-			const projectsResult = db.exec('SELECT * FROM approved_projects LIMIT 10');
-			if (projectsResult.length > 0) {
-				const columns = projectsResult[0].columns;
-				approvedProjects = projectsResult[0].values.map(row => {
-					const obj = {};
-					columns.forEach((col, i) => {
-						obj[col] = row[i];
-					});
-					return obj;
-				});
-			}
-
-			// Query first 10 rows from ysws_project_mentions
-			const mentionsResult = db.exec('SELECT * FROM ysws_project_mentions LIMIT 10');
-			if (mentionsResult.length > 0) {
-				const columns = mentionsResult[0].columns;
-				projectMentions = mentionsResult[0].values.map(row => {
-					const obj = {};
-					columns.forEach((col, i) => {
-						obj[col] = row[i];
-					});
-					return obj;
-				});
-			}
-		} catch (err) {
-			loadError = err.message;
-			console.error('Error loading database:', err);
-		} finally {
-			isLoading = false;
+	async function handleLoadDatabase() {
+		const success = await loadDatabase(apiKey);
+		if (success) {
+			loadTableData();
 		}
+	}
+
+	function loadTableData() {
+		// Query first 10 rows from approved_projects
+		approvedProjects = queryAll('SELECT * FROM approved_projects LIMIT 10');
+		
+		// Query first 10 rows from ysws_project_mentions
+		projectMentions = queryAll('SELECT * FROM ysws_project_mentions LIMIT 10');
+	}
+
+	function formatLastLoaded(date) {
+		if (!date) return 'Never';
+		const now = new Date();
+		const diff = now - date;
+		
+		// Less than a minute ago
+		if (diff < 60000) {
+			return 'Just now';
+		}
+		
+		// Less than an hour ago
+		if (diff < 3600000) {
+			const mins = Math.floor(diff / 60000);
+			return `${mins} minute${mins === 1 ? '' : 's'} ago`;
+		}
+		
+		// Less than a day ago
+		if (diff < 86400000) {
+			const hours = Math.floor(diff / 3600000);
+			return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+		}
+		
+		// Show full date/time
+		return date.toLocaleString();
 	}
 </script>
 
@@ -209,14 +179,43 @@
 	</div>
 
 	{#if apiKey && !isEditing}
-		<div class="data-section">
-			<button class="primary load-btn" on:click={loadDatabase} disabled={isLoading}>
-				{isLoading ? 'Loading...' : 'Load Database'}
-			</button>
+		<div class="database-section">
+			<div class="database-header">
+				<div class="database-status">
+					{#if $dbReady}
+						<span class="status-indicator ready">●</span>
+						<span>Database loaded</span>
+					{:else}
+						<span class="status-indicator not-ready">●</span>
+						<span>Database not loaded</span>
+					{/if}
+				</div>
+				
+				<div class="database-actions">
+					<button 
+						class="primary reload-btn" 
+						on:click={handleLoadDatabase} 
+						disabled={$isLoading}
+					>
+						{#if $isLoading}
+							<span class="spinner"></span>
+							Loading...
+						{:else}
+							🔄 {$dbReady ? 'Reload' : 'Load'} Database
+						{/if}
+					</button>
+				</div>
+				
+				{#if $lastLoaded}
+					<div class="last-loaded">
+						Last loaded: <strong>{formatLastLoaded($lastLoaded)}</strong>
+					</div>
+				{/if}
+			</div>
 
-			{#if loadError}
+			{#if $loadError}
 				<div class="error-message">
-					{loadError}
+					{$loadError}
 				</div>
 			{/if}
 
@@ -365,6 +364,9 @@
 		font-weight: 500;
 		cursor: pointer;
 		transition: all 0.2s ease;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.5em;
 	}
 
 	button:disabled {
@@ -442,14 +444,77 @@
 		margin-bottom: 0;
 	}
 
-	/* Data section styles */
-	.data-section {
+	/* Database section styles */
+	.database-section {
 		margin-top: 2em;
 	}
 
-	.load-btn {
-		padding: 0.8em 2em;
+	.database-header {
+		background: rgba(255, 255, 255, 0.05);
+		border: 1px solid rgba(255, 255, 255, 0.1);
+		border-radius: 12px;
+		padding: 1.5em;
+		margin-bottom: 2em;
+		max-width: 600px;
+		margin-left: auto;
+		margin-right: auto;
+		display: flex;
+		flex-direction: column;
+		gap: 1em;
+		align-items: center;
+	}
+
+	.database-status {
+		display: flex;
+		align-items: center;
+		gap: 0.5em;
+		font-size: 1.1em;
+	}
+
+	.status-indicator {
+		font-size: 1.2em;
+	}
+
+	.status-indicator.ready {
+		color: #4caf50;
+	}
+
+	.status-indicator.not-ready {
+		color: #ff9800;
+	}
+
+	.database-actions {
+		display: flex;
+		gap: 0.5em;
+	}
+
+	.reload-btn {
+		padding: 0.8em 1.5em;
 		font-size: 1em;
+	}
+
+	.last-loaded {
+		font-size: 0.9em;
+		color: rgba(255, 255, 255, 0.6);
+	}
+
+	.last-loaded strong {
+		color: rgba(255, 255, 255, 0.9);
+	}
+
+	.spinner {
+		width: 16px;
+		height: 16px;
+		border: 2px solid rgba(255, 255, 255, 0.3);
+		border-top-color: white;
+		border-radius: 50%;
+		animation: spin 0.8s linear infinite;
+	}
+
+	@keyframes spin {
+		to {
+			transform: rotate(360deg);
+		}
 	}
 
 	.error-message {
@@ -518,7 +583,8 @@
 	}
 
 	@media (prefers-color-scheme: light) {
-		.api-key-section {
+		.api-key-section,
+		.database-header {
 			background: rgba(0, 0, 0, 0.03);
 			border-color: rgba(0, 0, 0, 0.1);
 		}
@@ -564,9 +630,22 @@
 		tr:hover {
 			background: rgba(0, 0, 0, 0.02);
 		}
+
+		.last-loaded {
+			color: rgba(0, 0, 0, 0.6);
+		}
+
+		.last-loaded strong {
+			color: rgba(0, 0, 0, 0.9);
+		}
+
+		.status-indicator.not-ready {
+			color: #ed6c02;
+		}
+
+		.spinner {
+			border-color: rgba(255, 255, 255, 0.3);
+			border-top-color: white;
+		}
 	}
 </style>
-
-
-
-

@@ -4,6 +4,7 @@ go 1.21
 
 require (
 	github.com/joho/godotenv v1.5.1
+	github.com/klauspost/compress v1.17.4
 	github.com/lib/pq v1.10.9
 	modernc.org/sqlite v1.28.0
 )
@@ -27,6 +28,3 @@ require (
 	modernc.org/strutil v1.1.3 // indirect
 	modernc.org/token v1.1.0 // indirect
 )
-
-
-
