@@ -52,6 +52,11 @@ async function initSqlJs() {
 		await new Promise((resolve, reject) => {
 			const script = document.createElement('script');
 			script.src = 'https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.min.js';
+			
+			// Subresource Integrity for CDN security
+			script.integrity = 'sha512-f4bgk3aqQ6nrGVs1Aw0R9kH598VsHnz+xXmRa3kv0wu+WhVp/58fExWhUnYyOyT9R1xA+ILShDUeMBg5hC7CmA==';
+			script.crossOrigin = 'anonymous';
+			
 			script.onload = resolve;
 			script.onerror = () => reject(new Error('Failed to load sql.js from CDN'));
 			document.head.appendChild(script);

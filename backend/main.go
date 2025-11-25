@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
@@ -283,7 +284,7 @@ func authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		if providedKey != apiKey {
+		if subtle.ConstantTimeCompare([]byte(providedKey), []byte(apiKey)) != 1 {
 			appLog.Warn("Auth failed: invalid API key (method: %s)", authMethod)
 			w.Header().Set("WWW-Authenticate", `Bearer realm="API"`)
 			http.Error(w, "Unauthorized: API key is required", http.StatusUnauthorized)
