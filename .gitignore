@@ -34,8 +34,12 @@ build/
 go.work
 go.work.sum
 /bin/
+!/bin/code2prompt
 /server
 backend/server
+
+# Generated files
+prompt.txt
 
 # IDE and Editor files
 .vscode/

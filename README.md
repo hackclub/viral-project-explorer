@@ -56,12 +56,17 @@ Contains YSWS approved project information.
 |--------|------|-------------|
 | `record_id` | TEXT | **Primary key.** Airtable record ID |
 | `first_name` | TEXT | Project author's first name |
+| `last_name` | TEXT | Project author's last name |
 | `git_hub_username` | TEXT | Author's GitHub username |
 | `geocoded_country` | TEXT | Country name (geocoded) |
-| `hack_clubber_geocoded_country` | TEXT | Alternative geocoded country |
 | `geocoded_country_code` | TEXT | ISO country code (e.g., US, IN) |
 | `playable_url` | TEXT | Live/playable URL for the project |
 | `code_url` | TEXT | Source code URL |
+| `hours_spent` | REAL | Hours spent on the project |
+| `approved_at` | TEXT | Date project was approved |
+| `override_hours_spent_justification` | TEXT | Justification for hours override |
+| `age_when_approved` | INTEGER | Age of the creator when approved |
+| `ysws_name` | TEXT | Name of the YSWS program (e.g., "Daydream", "Summer of Making") |
 
 ### `ysws_project_mentions`
 

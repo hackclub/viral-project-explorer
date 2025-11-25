@@ -485,12 +485,17 @@ func createSQLiteTables(db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS approved_projects (
 			record_id TEXT PRIMARY KEY,
 			first_name TEXT,
+			last_name TEXT,
 			git_hub_username TEXT,
 			geocoded_country TEXT,
-			hack_clubber_geocoded_country TEXT,
 			geocoded_country_code TEXT,
 			playable_url TEXT,
-			code_url TEXT
+			code_url TEXT,
+			hours_spent REAL,
+			approved_at TEXT,
+			override_hours_spent_justification TEXT,
+			age_when_approved INTEGER,
+			ysws_name TEXT
 		)
 	`)
 	if err != nil {
@@ -539,18 +544,26 @@ func createSQLiteTables(db *sql.DB) error {
 }
 
 func copyApprovedProjects(sqliteDB *sql.DB) (int, error) {
-	// Query PostgreSQL for approved_projects data
+	// Query PostgreSQL for approved_projects data with YSWS name from child table
 	rows, err := pgDB.Query(`
 		SELECT 
-			record_id,
-			first_name,
-			git_hub_username,
-			geocoded_country,
-			hack_clubber_geocoded_country,
-			geocoded_country_code,
-			playable_url,
-			code_url
-		FROM airtable_unified_ysws_projects_db.approved_projects
+			ap.record_id,
+			ap.first_name,
+			ap.last_name,
+			ap.git_hub_username,
+			ap.geocoded_country,
+			ap.geocoded_country_code,
+			ap.playable_url,
+			ap.code_url,
+			ap.hours_spent,
+			ap.approved_at,
+			ap.override_hours_spent_justification,
+			ap.age_when_approved,
+			ysws_name.value as ysws_name
+		FROM airtable_unified_ysws_projects_db.approved_projects ap
+		LEFT JOIN airtable_unified_ysws_projects_db.approved_projects__ysws_name ysws_name
+			ON ap._dlt_id = ysws_name._dlt_parent_id
+			AND ysws_name._dlt_list_idx = 0
 	`)
 	if err != nil {
 		return 0, fmt.Errorf("querying PostgreSQL: %w", err)
@@ -566,9 +579,11 @@ func copyApprovedProjects(sqliteDB *sql.DB) (int, error) {
 	// Prepare SQLite insert statement
 	stmt, err := tx.Prepare(`
 		INSERT INTO approved_projects (
-			record_id, first_name, git_hub_username, geocoded_country,
-			hack_clubber_geocoded_country, geocoded_country_code, playable_url, code_url
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			record_id, first_name, last_name, git_hub_username, geocoded_country,
+			geocoded_country_code, playable_url, code_url,
+			hours_spent, approved_at, override_hours_spent_justification, age_when_approved,
+			ysws_name
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		tx.Rollback()
@@ -578,12 +593,18 @@ func copyApprovedProjects(sqliteDB *sql.DB) (int, error) {
 
 	count := 0
 	for rows.Next() {
-		var recordID, firstName, gitHubUsername, geocodedCountry sql.NullString
-		var hackClubberGeocodedCountry, geocodedCountryCode, playableURL, codeURL sql.NullString
+		var recordID, firstName, lastName, gitHubUsername, geocodedCountry sql.NullString
+		var geocodedCountryCode, playableURL, codeURL sql.NullString
+		var hoursSpent sql.NullFloat64
+		var approvedAt, overrideHoursJustification sql.NullString
+		var ageWhenApproved sql.NullInt64
+		var yswsName sql.NullString
 
 		err := rows.Scan(
-			&recordID, &firstName, &gitHubUsername, &geocodedCountry,
-			&hackClubberGeocodedCountry, &geocodedCountryCode, &playableURL, &codeURL,
+			&recordID, &firstName, &lastName, &gitHubUsername, &geocodedCountry,
+			&geocodedCountryCode, &playableURL, &codeURL,
+			&hoursSpent, &approvedAt, &overrideHoursJustification, &ageWhenApproved,
+			&yswsName,
 		)
 		if err != nil {
 			tx.Rollback()
@@ -592,9 +613,12 @@ func copyApprovedProjects(sqliteDB *sql.DB) (int, error) {
 
 		_, err = stmt.Exec(
 			nullStringToPtr(recordID), nullStringToPtr(firstName),
-			nullStringToPtr(gitHubUsername), nullStringToPtr(geocodedCountry),
-			nullStringToPtr(hackClubberGeocodedCountry), nullStringToPtr(geocodedCountryCode),
-			nullStringToPtr(playableURL), nullStringToPtr(codeURL),
+			nullStringToPtr(lastName), nullStringToPtr(gitHubUsername), nullStringToPtr(geocodedCountry),
+			nullStringToPtr(geocodedCountryCode),
+			normalizeURL(playableURL), normalizeURL(codeURL),
+			nullFloat64ToPtr(hoursSpent), nullStringToPtr(approvedAt),
+			nullStringToPtr(overrideHoursJustification), nullInt64ToPtr(ageWhenApproved),
+			nullStringToPtr(yswsName),
 		)
 		if err != nil {
 			tx.Rollback()
@@ -688,9 +712,9 @@ func copyProjectMentions(sqliteDB *sql.DB) (int, error) {
 			nullStringToPtr(mentionSearches), nullStringToPtr(fromApproved),
 			nullStringToPtr(recordID), nullStringToPtr(yswsApproved),
 			nullStringToPtr(source), nullStringToPtr(linkFoundAt),
-			nullStringToPtr(archiveURL), nullStringToPtr(url),
+			normalizeURL(archiveURL), normalizeURL(url),
 			nullStringToPtr(headline), nullStringToPtr(date),
-			nullFloat64ToPtr(weightedEngagement), nullStringToPtr(projectURL),
+			nullFloat64ToPtr(weightedEngagement), normalizeURL(projectURL),
 			nullInt64ToPtr(engagementCount), nullStringToPtr(engagementType),
 			nullBoolToInt(mentionsHackClub), nullBoolToInt(publishedByHackClub),
 		)
@@ -737,4 +761,33 @@ func nullBoolToInt(nb sql.NullBool) interface{} {
 		return 0
 	}
 	return nil
+}
+
+// normalizeURL normalizes a URL by:
+// - Trimming whitespace
+// - Lowercasing
+// - Adding https:// prefix if no scheme is present
+func normalizeURL(ns sql.NullString) interface{} {
+	if !ns.Valid || ns.String == "" {
+		return nil
+	}
+
+	// Trim whitespace and normalize multiple spaces
+	url := strings.TrimSpace(ns.String)
+	// Replace multiple spaces with single space, then remove all spaces
+	url = strings.Join(strings.Fields(url), "")
+
+	// Lowercase the URL
+	url = strings.ToLower(url)
+
+	// Add https:// if no scheme present
+	if url != "" && !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		url = "https://" + url
+	}
+
+	if url == "" {
+		return nil
+	}
+
+	return url
 }
